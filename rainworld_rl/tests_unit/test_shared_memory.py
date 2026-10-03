@@ -30,34 +30,38 @@ def make_client(mapping: FakeMapping, width: int = 8, height: int = 4) -> Shared
 def test_header_struct_matches_protocol_offsets():
     assert sm.HEADER_STRUCT.size == 64
     state = ModState(
-        sync_flag = 2, action = 0x29, ticks_per_step = 4, status = 0x3F,
-        frame_width = 160, frame_height = 90, command = 1, command_result = 2,
-        heartbeat = 0xDEADBEEF, step_counter = 77, karma = 3, karma_cap = 5, food = 9,
+        sync_flag = 2, ticks_per_step = 4, status = 0x3F,
+        frame_width = 160, frame_height = 90, command = 1, command_result = 2, game_flags = 0x0B,
+        heartbeat = 0xDEADBEEF, step_counter = 77, karma = 3, karma_cap = 5, food = 9, food_max = 11,
         player_x = 1.5, player_y = -2.5, room_index = -1, cycle_number = 12,
+        action_bits = 0x1A5, cycle_progress = 0.5,
     )
     buf = state.pack()
     assert len(buf) == 64
     # Spot-check the documented offsets independently of the Struct.
-    assert buf[0] == 2 and buf[1] == 0x29 and buf[2] == 4 and buf[3] == 0x3F
+    assert buf[0] == 2 and buf[1] == 0 and buf[2] == 4 and buf[3] == 0x3F   # offset 1 reserved
     assert struct.unpack_from("<I", buf, 4)[0] == 160
     assert struct.unpack_from("<I", buf, 8)[0] == 90
-    assert buf[12] == 1 and buf[13] == 2
+    assert buf[12] == 1 and buf[13] == 2 and buf[14] == 0x0B and buf[15] == 0
     assert struct.unpack_from("<I", buf, 16)[0] == 0xDEADBEEF
     assert struct.unpack_from("<I", buf, 20)[0] == 77
-    assert buf[24:27] == bytes((3, 5, 9))
+    assert buf[24:28] == bytes((3, 5, 9, 11))
     assert struct.unpack_from("<f", buf, 28)[0] == 1.5
     assert struct.unpack_from("<f", buf, 32)[0] == -2.5
     assert struct.unpack_from("<i", buf, 36)[0] == -1
     assert struct.unpack_from("<i", buf, 40)[0] == 12
-    assert buf[44:64] == bytes(20)
+    assert struct.unpack_from("<I", buf, 44)[0] == 0x1A5                   # action_bits
+    assert struct.unpack_from("<f", buf, 48)[0] == 0.5
+    assert buf[52:64] == bytes(12)
 
 
 def test_header_pack_unpack_round_trip():
     state = ModState(
-        sync_flag = 3, action = 0x45, ticks_per_step = 255, status = 0x2A,
+        sync_flag = 3, ticks_per_step = 255, status = 0x2A,
         frame_width = 1920, frame_height = 1080, command = 1, command_result = 1,
         heartbeat = 4_000_000_000, step_counter = 123456, karma = 9, karma_cap = 10, food = 7,
         player_x = 1024.25, player_y = 300.75, room_index = 2**31 - 1, cycle_number = -1,
+        action_bits = 0x1FF,
     )
     again = ModState.unpack(state.pack())
     assert again == state
@@ -84,26 +88,6 @@ def test_to_info_contains_expected_fields():
         "in_shelter": True, "cycle_survived": True, "rain": False, "dialog_open": False,
         "cycle_progress": 0.25,
     }
-
-
-# ---------------------------------------------------------------------------
-# Action encoding
-# ---------------------------------------------------------------------------
-
-def test_discrete_action_encoding():
-    assert sm.encode_discrete_action(0) == 0
-    assert sm.encode_discrete_action(1) == 1 << 3          # left
-    assert sm.encode_discrete_action(2) == 2 << 3          # right
-    assert sm.encode_discrete_action(3) == 2 << 5          # up
-    assert sm.encode_discrete_action(4) == 1 << 5          # down
-    assert sm.encode_discrete_action(5) == sm.ACTION_JUMP
-    assert sm.encode_discrete_action(6) == sm.ACTION_GRAB
-    assert sm.encode_discrete_action(7) == sm.ACTION_THROW
-    assert sm.encode_discrete_action(9) == sm.ACTION_JUMP | (2 << 3)
-    assert sm.encode_discrete_action(17) == (2 << 3) | (1 << 5)
-    assert len({sm.encode_discrete_action(a) for a in range(18)}) == 18
-    with pytest.raises(ValueError):
-        sm.encode_discrete_action(18)
 
 
 # ---------------------------------------------------------------------------
@@ -195,12 +179,12 @@ def test_step_handshake_returns_frame_and_state():
     client = make_client(mapping, 8, 4)
     client.connect(liveness_timeout = 0.1)
 
-    frame, state = client.step(action = 9, ticks_per_step = 4, timeout = 1.0)
+    frame, state = client.step(action = sm.KEY_RIGHT | sm.KEY_JUMP, ticks_per_step = 4, timeout = 1.0)
 
     assert frame.shape == (4, 8, 3) and frame.dtype == np.uint8
     assert frame.flags.writeable
     assert np.all(frame == 200)
-    assert mapping.steps_serviced == [(sm.encode_discrete_action(9), 4)]
+    assert mapping.steps_serviced == [(sm.KEY_RIGHT | sm.KEY_JUMP, 4)]
     assert mapping.header().sync_flag == sm.SYNC_IDLE       # python wrote IDLE after reading
     assert state.sync_flag == sm.SYNC_FRAME_READY           # snapshot taken at FRAME_READY
     assert state.step_counter == 1
@@ -265,7 +249,7 @@ def test_step_waits_through_human_override_without_timing_out(caplog):
     t.start()
     with caplog.at_level(logging.INFO, logger = "rainworld_rl.shared_memory"):
         started = time.monotonic()
-        frame, state = client.step(5, timeout = 0.1)   # timeout << override duration
+        frame, state = client.step(sm.KEY_JUMP, timeout = 0.1)   # timeout << override duration
         elapsed = time.monotonic() - started
     t.join()
 
@@ -372,7 +356,7 @@ def test_kill_player_timeout_raises():
 def test_operations_require_connection():
     client = make_client(FakeMapping())
     with pytest.raises(sm.NotConnectedError):
-        client.send_action_discrete(0)
+        client.send_action(0)
     with pytest.raises(sm.NotConnectedError):
         client.wait_for_frame(0.01)
     with pytest.raises(sm.NotConnectedError):
@@ -409,7 +393,9 @@ def test_env_construction_is_cheap_and_never_touches_mapping():
     assert calls == []
     assert not env.connected
     assert env.observation_space.shape == (4, 8, 3)
-    assert env.action_space.n == 18
+    import gymnasium.spaces as spaces
+    assert isinstance(env.action_space, spaces.MultiBinary)
+    assert env.action_space.shape == (sm.NUM_KEYS,) == (9,)
 
 
 def test_env_reset_without_game_raises_clear_error():
@@ -465,10 +451,10 @@ def test_env_step_never_terminates_and_reports_death_in_info():
     env.reset()
     mapping.next_step_dead = True
 
-    obs, reward, terminated, truncated, info = env.step(5)
+    obs, reward, terminated, truncated, info = env.step(sm.KEY_JUMP)
     assert reward == 0.0 and terminated is False and truncated is False
     assert info["player_dead"] is True
-    assert mapping.steps_serviced[-1] == (sm.ACTION_JUMP, 2)
+    assert mapping.steps_serviced[-1] == (sm.KEY_JUMP, 2)
 
     _, _, _, _, info2 = env.step(0)
     assert info2["player_dead"] is False          # edge, not level

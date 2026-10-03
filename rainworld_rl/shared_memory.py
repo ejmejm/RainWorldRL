@@ -1,7 +1,7 @@
 """
 Shared memory client for communicating with the Rain World RL mod.
 
-Implements protocol v2 as described in ``docs/PROTOCOL.md``. The mapping is a
+Implements protocol v3 as described in ``docs/PROTOCOL.md``. The mapping is a
 named memory-mapped file (``RainWorldRL``) consisting of a 64-byte header
 followed by an RGB24 frame of up to 1920x1080.
 
@@ -9,26 +9,34 @@ Header layout (all little-endian)::
 
     Offset Size Dir     Field
     0      1    both    sync_flag       0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
-    1      1    py->mod action          bitfield (b0 jump, b1 grab, b2 throw, b3-4 horiz, b5-6 vert)
+    1      1    -       reserved        (legacy v2 action byte, no longer used)
     2      1    py->mod ticks_per_step  1..255 (0 treated as 1)
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
     12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
-    14     2    -       reserved
+    14     1    mod->py game_flags      see GAME_FLAG_* bits
+    15     1    -       reserved
     16     4    mod->py heartbeat       uint32, bumped every Unity Update
     20     4    mod->py step_counter    uint32, bumped once per completed step
     24     1    mod->py karma           uint8
     25     1    mod->py karma_cap       uint8
     26     1    mod->py food            uint8
-    27     1    -       reserved
+    27     1    mod->py food_max        uint8
     28     4    mod->py player_x        float32
     32     4    mod->py player_y        float32
     36     4    mod->py room_index      int32 (-1 if unavailable)
     40     4    mod->py cycle_number    int32 (-1 if unavailable)
-    44     20   -       reserved
+    44     4    py->mod action_bits     uint32, one bit per held key (KEY_* / KEY_NAMES)
+    48     4    mod->py cycle_progress  float32
+    52     12   -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
+
+Actions are *raw key presses*: ``action_bits`` has one bit per key a player
+can hold (``KEY_LEFT`` ... ``KEY_SPECIAL``), any combination at once. The
+Discrete(18) action set lives in ``rainworld_rl.wrappers`` as an optional
+``gym.ActionWrapper``.
 
 Status byte: bit 1 (``CONNECTED``) is owned by Python, every other bit is
 owned by the mod. Each side only ever read-modify-writes its own bits.
@@ -74,7 +82,7 @@ SYNC_PROCESSING = 3
 
 # Header offsets
 OFFSET_SYNC_FLAG = 0
-OFFSET_ACTION = 1
+# offset 1 is reserved (legacy v2 action byte; the mod no longer reads it)
 OFFSET_TICKS_PER_STEP = 2
 OFFSET_STATUS = 3
 OFFSET_WIDTH = 4
@@ -96,12 +104,29 @@ OFFSET_ACTION_BITS = 44       # py->mod uint32, protocol v3 action bitfield (see
 OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FRAME_DATA = HEADER_SIZE
 
-# Action bitfield
-ACTION_JUMP = 0x01
-ACTION_GRAB = 0x02
-ACTION_THROW = 0x04
-ACTION_HORIZONTAL_SHIFT = 3  # bits 3-4: 0 none, 1 left, 2 right
-ACTION_VERTICAL_SHIFT = 5    # bits 5-6: 0 none, 1 down, 2 up
+# action_bits (offset 44): one bit per player key. Must match SharedMemoryBridge.cs KEY_*
+# and the "Action bits" table in docs/PROTOCOL.md. Any combination may be held at once.
+# Game evidence (v1.11.8): RWInput.PlayerInputLogic reads Rewired actions 0 Jump,
+# 1 MoveHorizontal, 2 MoveVertical, 3 Take (pckp), 4 Throw, 11 Map, 34 Special
+# (RWInput.cs:187-207). Pause (action 5 / Escape) is deliberately not a key.
+KEY_LEFT = 1 << 0     # InputPackage.x = -1 (left + right held -> 0)
+KEY_RIGHT = 1 << 1    # InputPackage.x = +1
+KEY_UP = 1 << 2       # InputPackage.y = +1 (up + down held -> 0)
+KEY_DOWN = 1 << 3     # InputPackage.y = -1; down + a side key sets downDiagonal (crawl/roll)
+KEY_JUMP = 1 << 4     # jmp  (also "submit"/continue in dialogs)
+KEY_GRAB = 1 << 5     # pckp (pick up / eat / interact)
+KEY_THROW = 1 << 6    # thrw (also "cancel" in dialogs)
+KEY_MAP = 1 << 7      # mp   (map; also restarts from the game-over prompt)
+KEY_SPECIAL = 1 << 8  # spec (Watcher warp/camo, Saint ascension, Artificer pyro-jump)
+
+# Bit order == index into a MultiBinary(NUM_KEYS) action vector.
+KEY_NAMES: Tuple[str, ...] = (
+    "left", "right", "up", "down", "jump", "grab", "throw", "map", "special",
+)
+NUM_KEYS = len(KEY_NAMES)
+KEY_BITS: Dict[str, int] = {name: 1 << i for i, name in enumerate(KEY_NAMES)}
+KEY_ALL_MASK = (1 << NUM_KEYS) - 1
+assert KEY_BITS["special"] == KEY_SPECIAL and KEY_BITS["left"] == KEY_LEFT
 
 # Status bits
 STATUS_PLAYER_DEAD = 0x01     # mod, edge: set for the one step the player died
@@ -128,15 +153,13 @@ COMMAND_RESULT_ERROR = 2
 GAME_FLAG_IN_SHELTER = 0x01      # level: player is inside a shelter room
 GAME_FLAG_CYCLE_SURVIVED = 0x02  # edge: the cycle was survived (hibernation) during this step
 GAME_FLAG_RAIN = 0x04            # level: the rain/cycle-end has started
-GAME_FLAG_DIALOG_OPEN = 0x08     # level: an in-game text/dialog overlay awaits player input
-
-NUM_DISCRETE_ACTIONS = 18
+GAME_FLAG_DIALOG_OPEN = 0x08     # level: an in-game prompt (dialog, game-over, pause menu) awaits a key
 
 # Whole-header struct. Field order matches the layout table above.
 HEADER_STRUCT = struct.Struct(
     "<"
     "B"    # sync_flag
-    "B"    # action
+    "x"    # reserved (legacy action byte)
     "B"    # ticks_per_step
     "B"    # status
     "I"    # frame_width
@@ -206,7 +229,6 @@ class ModState:
     """
 
     sync_flag: int = SYNC_IDLE
-    action: int = 0
     ticks_per_step: int = 1
     status: int = 0
     frame_width: int = 0
@@ -279,7 +301,6 @@ class ModState:
         """Serialise to the 64-byte header layout."""
         return HEADER_STRUCT.pack(
             self.sync_flag & 0xFF,
-            self.action & 0xFF,
             self.ticks_per_step & 0xFF,
             self.status & 0xFF,
             self.frame_width & 0xFFFFFFFF,
@@ -334,65 +355,71 @@ class ModState:
 # Action helpers
 # ---------------------------------------------------------------------------
 
-def encode_action(
-    jump: bool = False,
-    grab: bool = False,
-    throw: bool = False,
-    horizontal: int = 0,
-    vertical: int = 0,
-) -> int:
-    """Build the action bitfield byte from individual inputs."""
-    action = 0
-    if jump:
-        action |= ACTION_JUMP
-    if grab:
-        action |= ACTION_GRAB
-    if throw:
-        action |= ACTION_THROW
-    h_val = 0 if horizontal == 0 else (1 if horizontal < 0 else 2)
-    v_val = 0 if vertical == 0 else (1 if vertical < 0 else 2)
-    action |= h_val << ACTION_HORIZONTAL_SHIFT
-    action |= v_val << ACTION_VERTICAL_SHIFT
-    return action
+def encode_keys(*names: str, **flags: bool) -> int:
+    """
+    Build an ``action_bits`` mask from key names.
+
+    ``encode_keys("left", "jump")`` and ``encode_keys(left = True, jump = True)``
+    both give ``KEY_LEFT | KEY_JUMP``. Unknown names raise ``KeyError``.
+    """
+    bits = 0
+    for name in names:
+        bits |= KEY_BITS[name]
+    for name, pressed in flags.items():
+        if name not in KEY_BITS:
+            raise KeyError(f"unknown key {name!r}; known keys: {KEY_NAMES}")
+        if pressed:
+            bits |= KEY_BITS[name]
+    return bits
 
 
-# (jump, grab, throw, horizontal, vertical) per discrete action index.
-DISCRETE_ACTIONS: Tuple[Tuple[bool, bool, bool, int, int], ...] = (
-    (False, False, False, 0, 0),    # 0  No-op
-    (False, False, False, -1, 0),   # 1  Left
-    (False, False, False, 1, 0),    # 2  Right
-    (False, False, False, 0, 1),    # 3  Up
-    (False, False, False, 0, -1),   # 4  Down
-    (True, False, False, 0, 0),     # 5  Jump
-    (False, True, False, 0, 0),     # 6  Grab
-    (False, False, True, 0, 0),     # 7  Throw
-    (True, False, False, -1, 0),    # 8  Left + Jump
-    (True, False, False, 1, 0),     # 9  Right + Jump
-    (True, False, False, 0, 1),     # 10 Up + Jump
-    (True, False, False, 0, -1),    # 11 Down + Jump
-    (False, True, False, -1, 0),    # 12 Left + Grab
-    (False, True, False, 1, 0),     # 13 Right + Grab
-    (False, True, False, 0, 1),     # 14 Up + Grab
-    (False, True, False, 0, -1),    # 15 Down + Grab
-    (False, False, False, -1, -1),  # 16 Left + Down (crawl left)
-    (False, False, False, 1, -1),   # 17 Right + Down (crawl right)
-)
-assert len(DISCRETE_ACTIONS) == NUM_DISCRETE_ACTIONS
-
-DISCRETE_ACTION_NAMES: Tuple[str, ...] = (
-    "No-op", "Left", "Right", "Up", "Down",
-    "Jump", "Grab", "Throw",
-    "Left+Jump", "Right+Jump", "Up+Jump", "Down+Jump",
-    "Left+Grab", "Right+Grab", "Up+Grab", "Down+Grab",
-    "Crawl Left", "Crawl Right",
-)
+def keys_to_bits(keys) -> int:
+    """
+    Convert a MultiBinary-style vector (length ``NUM_KEYS``, entries 0/1 or
+    bool, index == ``KEY_NAMES`` order) to an ``action_bits`` mask.
+    """
+    arr = np.asarray(keys).reshape(-1)
+    if arr.shape[0] != NUM_KEYS:
+        raise ValueError(f"key vector must have length {NUM_KEYS} ({KEY_NAMES}), got shape {np.shape(keys)}")
+    bits = 0
+    for i in range(NUM_KEYS):
+        if arr[i]:
+            bits |= 1 << i
+    return bits
 
 
-def encode_discrete_action(action: int) -> int:
-    """Map a discrete action index (0-17) to the action bitfield byte."""
-    if not 0 <= action < NUM_DISCRETE_ACTIONS:
-        raise ValueError(f"Discrete action must be in [0, {NUM_DISCRETE_ACTIONS}), got {action}")
-    return encode_action(*DISCRETE_ACTIONS[action])
+def bits_to_keys(bits: int) -> np.ndarray:
+    """Inverse of ``keys_to_bits``: an ``int8`` vector of length ``NUM_KEYS``."""
+    bits = int(bits)
+    return np.array([(bits >> i) & 1 for i in range(NUM_KEYS)], dtype = np.int8)
+
+
+def action_to_bits(action) -> int:
+    """
+    Normalise an action the env accepts into an ``action_bits`` mask.
+
+    * an integer (``int``, ``numpy`` integer, ``bool``) is taken as a bitmask;
+    * anything array-like of length ``NUM_KEYS`` is taken as a key vector.
+
+    Raises ``ValueError`` for out-of-range masks or wrong-length vectors.
+    """
+    if isinstance(action, (bool, np.bool_)):
+        action = int(action)
+    if isinstance(action, (int, np.integer)):
+        bits = int(action)
+        if not 0 <= bits <= KEY_ALL_MASK:
+            raise ValueError(f"action bitmask {bits} out of range [0, {KEY_ALL_MASK}]")
+        return bits
+    if np.ndim(action) == 0:
+        # 0-d array or other scalar
+        return action_to_bits(int(np.asarray(action).item()))
+    return keys_to_bits(action)
+
+
+def pressed_key_names(bits: int) -> Tuple[str, ...]:
+    """Names of the keys set in ``bits``, in ``KEY_NAMES`` order."""
+    bits = int(bits)
+    return tuple(name for i, name in enumerate(KEY_NAMES) if bits & (1 << i))
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +450,7 @@ class SharedMemoryClient:
         client = SharedMemoryClient(160, 90)
         client.connect()                     # raises GameNotRunningError if no game
         client.reset_game()                  # optional: wipe save, fresh game
-        frame, state = client.step(action = 5, ticks_per_step = 4)
+        frame, state = client.step(KEY_RIGHT | KEY_JUMP, ticks_per_step = 4)
         client.disconnect()
     """
 
@@ -669,46 +696,30 @@ class SharedMemoryClient:
 
     # -- stepping ----------------------------------------------------------
 
-    def send_action(
-        self,
-        jump: bool = False,
-        grab: bool = False,
-        throw: bool = False,
-        horizontal: int = 0,
-        vertical: int = 0,
-        ticks_per_step: int = 1,
-    ) -> None:
+    def send_action(self, action, ticks_per_step: int = 1) -> None:
         """
-        Write an action and signal ``ACTION_READY``.
+        Write ``action_bits`` and signal ``ACTION_READY``.
 
         Args:
-            jump / grab / throw: Button states.
-            horizontal: -1 left, 0 none, 1 right.
-            vertical: -1 down, 0 none, 1 up.
+            action: Keys to hold for this step - an ``int`` bitmask of ``KEY_*``
+                values, or a length-``NUM_KEYS`` 0/1 vector (``KEY_NAMES`` order,
+                e.g. a ``MultiBinary`` sample). See ``action_to_bits``.
             ticks_per_step: Physics ticks to run before the frame is returned (1..255).
         """
-        self.send_action_raw(encode_action(jump, grab, throw, horizontal, vertical), ticks_per_step)
+        self.send_action_bits(action_to_bits(action), ticks_per_step)
 
-    def send_action_raw(self, action_byte: int, ticks_per_step: int = 1) -> None:
-        """Write a pre-encoded action byte and signal ``ACTION_READY``."""
+    def send_action_bits(self, action_bits: int, ticks_per_step: int = 1) -> None:
+        """Write a pre-encoded ``action_bits`` mask (offset 44) and signal ``ACTION_READY``."""
         self._require_connected()
         send_start = time.perf_counter()
-        self._write_byte(OFFSET_ACTION, action_byte)
+        self._write_uint32(OFFSET_ACTION_BITS, int(action_bits) & KEY_ALL_MASK)
         self._write_byte(OFFSET_TICKS_PER_STEP, max(1, min(255, int(ticks_per_step))))
         self._write_byte(OFFSET_SYNC_FLAG, SYNC_ACTION_READY)
         self._send_action_time += time.perf_counter() - send_start
 
-    def send_action_discrete(self, action: int, ticks_per_step: int = 1) -> None:
-        """
-        Send one of the 18 discrete actions.
-
-        Mapping (see ``DISCRETE_ACTION_NAMES``):
-            0 No-op, 1 Left, 2 Right, 3 Up, 4 Down, 5 Jump, 6 Grab, 7 Throw,
-            8 Left+Jump, 9 Right+Jump, 10 Up+Jump, 11 Down+Jump,
-            12 Left+Grab, 13 Right+Grab, 14 Up+Grab, 15 Down+Grab,
-            16 Left+Down (crawl left), 17 Right+Down (crawl right)
-        """
-        self.send_action_raw(encode_discrete_action(int(action)), ticks_per_step)
+    def send_keys(self, *names: str, ticks_per_step: int = 1) -> None:
+        """Convenience: ``send_keys("right", "jump")``."""
+        self.send_action_bits(encode_keys(*names), ticks_per_step)
 
     def wait_for_frame(self, timeout: float = 10.0) -> Tuple[np.ndarray, ModState]:
         """
@@ -790,9 +801,9 @@ class SharedMemoryClient:
         self._read_frame_time += time.perf_counter() - read_start
         return frame
 
-    def step(self, action: int, ticks_per_step: int = 1, timeout: float = 10.0) -> Tuple[np.ndarray, ModState]:
-        """Convenience: ``send_action_discrete`` followed by ``wait_for_frame``."""
-        self.send_action_discrete(action, ticks_per_step)
+    def step(self, action = 0, ticks_per_step: int = 1, timeout: float = 10.0) -> Tuple[np.ndarray, ModState]:
+        """Convenience: ``send_action`` (bitmask or key vector) followed by ``wait_for_frame``."""
+        self.send_action(action, ticks_per_step)
         return self.wait_for_frame(timeout = timeout)
 
     # -- commands ----------------------------------------------------------

@@ -42,7 +42,8 @@ tail of the BepInEx log). With `--no-launch` and no running game, the session ab
 
 Helpers in `tests/harness.py`:
 
-- `step_n(env, n, action_fn=None) -> [(obs, info), ...]` (no-op when `action_fn` is omitted; `action_fn(i)` otherwise)
+- `step_n(env, n, action_fn=None) -> [(obs, info), ...]` (no keys held when `action_fn` is omitted; `action_fn(i)` otherwise, returning an int key bitmask such as `RIGHT | JUMP` or a MultiBinary vector)
+- key bitmask constants `NOOP`, `LEFT`, `RIGHT`, `UP`, `DOWN`, `JUMP`, `GRAB`, `THROW`, `MAP`, `SPECIAL` (`KEY_*` for the raw bits), `keys("right", "jump")`, `bits_to_vector(bits)`, `action_bits(action)`
 - `infos(results, "step_counter")` to pull one info key out of a `step_n` result
 - `assert_info_contract(info)` checks the info keys/types of the API contract
 - `read_state(env)`, `state_field(state, "heartbeat")`, `status_bit(state, "ready")` for raw header access
@@ -66,6 +67,6 @@ Helpers in `tests/harness.py`:
    - Anything that can legitimately fail because of game geometry / randomness goes under
      `@pytest.mark.xfail(strict=False, reason=...)`.
    - If you create a second `RainWorldEnv`, request `reattach_shared_env` so the session env is restored.
-   - Protocol constants (status bits, action ids, fresh-save cycle) live in `tests/harness.py`; keep them in
+   - Protocol constants (status bits, key bits, fresh-save cycle) live in `tests/harness.py`; keep them in
      sync with `docs/PROTOCOL.md`.
 3. Run `python -m pytest tests -q` (unit + skip check) and, if you can, `python -m pytest tests --e2e --no-launch -q`.
