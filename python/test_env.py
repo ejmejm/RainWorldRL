@@ -27,7 +27,7 @@ def main():
         "--height", type = int, default = 240, help = "Frame height (default: 240)"
     )
     parser.add_argument(
-        "--ticks", type = int, default = 4, help = "Ticks per step (default: 1)"
+        "--ticks", type = int, default = 4, help = "Ticks per step (default: 4)"
     )
     parser.add_argument(
         "--steps", type = int, default = 1000, help = "Number of steps to run (default: 1000)"

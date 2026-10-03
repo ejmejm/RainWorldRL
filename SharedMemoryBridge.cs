@@ -6,7 +6,9 @@ using System.Threading;
 /// Manages shared memory communication between the Rain World mod and Python RL client.
 /// 
 /// Memory Layout:
-/// Offset 0:  1 byte  - Sync flag (0=idle, 1=action_ready, 2=frame_ready)
+/// Offset 0:  1 byte  - Sync flag (0=idle, 1=action_ready, 2=frame_ready, 3=processing)
+///                      Python: idle -> action_ready. Mod: action_ready -> processing -> frame_ready.
+///                      Python: frame_ready -> idle after reading the frame.
 /// Offset 1:  1 byte  - Action bitfield (bits: 0=jump, 1=grab, 2=throw, 3-4=horizontal, 5-6=vertical)
 /// Offset 2:  1 byte  - Ticks per step
 /// Offset 3:  1 byte  - Status flags (bit 0=player_dead, bit 1=connected)
@@ -24,6 +26,7 @@ public class SharedMemoryBridge : IDisposable
     public const byte SYNC_IDLE = 0;
     public const byte SYNC_ACTION_READY = 1;
     public const byte SYNC_FRAME_READY = 2;
+    public const byte SYNC_PROCESSING = 3;
 
     // Memory offsets
     private const int OFFSET_SYNC_FLAG = 0;
@@ -85,24 +88,6 @@ public class SharedMemoryBridge : IDisposable
     public byte ReadAction()
     {
         return accessor.ReadByte(OFFSET_ACTION);
-    }
-
-    /// <summary>
-    /// Parses the action byte into individual control values.
-    /// </summary>
-    public void ParseAction(byte action, out bool jump, out bool grab, out bool throwItem, out int horizontal, out int vertical)
-    {
-        jump = (action & ACTION_JUMP) != 0;
-        grab = (action & ACTION_GRAB) != 0;
-        throwItem = (action & ACTION_THROW) != 0;
-
-        // Horizontal: 0=none, 1=left, 2=right -> -1, 0, 1
-        int hRaw = (action & ACTION_HORIZONTAL_MASK) >> 3;
-        horizontal = hRaw == 1 ? -1 : (hRaw == 2 ? 1 : 0);
-
-        // Vertical: 0=none, 1=down, 2=up -> -1, 0, 1
-        int vRaw = (action & ACTION_VERTICAL_MASK) >> 5;
-        vertical = vRaw == 1 ? -1 : (vRaw == 2 ? 1 : 0);
     }
 
     /// <summary>
@@ -197,6 +182,15 @@ public class SharedMemoryBridge : IDisposable
     public bool IsActionReady()
     {
         return ReadSyncFlag() == SYNC_ACTION_READY;
+    }
+
+    /// <summary>
+    /// Signals that the pending action has been consumed and a step is running.
+    /// Prevents the same action from being read again on subsequent Updates.
+    /// </summary>
+    public void SignalProcessing()
+    {
+        WriteSyncFlag(SYNC_PROCESSING);
     }
 
     /// <summary>
