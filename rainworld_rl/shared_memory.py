@@ -81,15 +81,19 @@ OFFSET_WIDTH = 4
 OFFSET_HEIGHT = 8
 OFFSET_COMMAND = 12
 OFFSET_COMMAND_RESULT = 13
+OFFSET_GAME_FLAGS = 14
 OFFSET_HEARTBEAT = 16
 OFFSET_STEP_COUNTER = 20
 OFFSET_KARMA = 24
 OFFSET_KARMA_CAP = 25
 OFFSET_FOOD = 26
+OFFSET_FOOD_MAX = 27
 OFFSET_PLAYER_X = 28
 OFFSET_PLAYER_Y = 32
 OFFSET_ROOM_INDEX = 36
 OFFSET_CYCLE_NUMBER = 40
+OFFSET_ACTION_BITS = 44       # py->mod uint32, protocol v3 action bitfield (see PROTOCOL.md)
+OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FRAME_DATA = HEADER_SIZE
 
 # Action bitfield
@@ -113,11 +117,18 @@ MOD_OWNED_STATUS_MASK = 0xFF & ~PY_OWNED_STATUS_MASK
 # Commands
 COMMAND_NONE = 0
 COMMAND_RESET = 1
+COMMAND_KILL_PLAYER = 2       # debug: kill player 0 (death edge + respawn flow)
 
 # Command results
 COMMAND_RESULT_PENDING = 0
 COMMAND_RESULT_OK = 1
 COMMAND_RESULT_ERROR = 2
+
+# game_flags (offset 14, mod-owned, protocol v3)
+GAME_FLAG_IN_SHELTER = 0x01      # level: player is inside a shelter room
+GAME_FLAG_CYCLE_SURVIVED = 0x02  # edge: the cycle was survived (hibernation) during this step
+GAME_FLAG_RAIN = 0x04            # level: the rain/cycle-end has started
+GAME_FLAG_DIALOG_OPEN = 0x08     # level: an in-game text/dialog overlay awaits player input
 
 NUM_DISCRETE_ACTIONS = 18
 
@@ -132,18 +143,21 @@ HEADER_STRUCT = struct.Struct(
     "I"    # frame_height
     "B"    # command
     "B"    # command_result
-    "2x"   # reserved
+    "B"    # game_flags
+    "x"    # reserved
     "I"    # heartbeat
     "I"    # step_counter
     "B"    # karma
     "B"    # karma_cap
     "B"    # food
-    "x"    # reserved
+    "B"    # food_max
     "f"    # player_x
     "f"    # player_y
     "i"    # room_index
     "i"    # cycle_number
-    "20x"  # reserved
+    "I"    # action_bits
+    "f"    # cycle_progress
+    "12x"  # reserved
 )
 assert HEADER_STRUCT.size == HEADER_SIZE, HEADER_STRUCT.size
 
@@ -199,15 +213,19 @@ class ModState:
     frame_height: int = 0
     command: int = COMMAND_NONE
     command_result: int = COMMAND_RESULT_PENDING
+    game_flags: int = 0
     heartbeat: int = 0
     step_counter: int = 0
     karma: int = 0
     karma_cap: int = 0
     food: int = 0
+    food_max: int = 0
     player_x: float = 0.0
     player_y: float = 0.0
     room_index: int = -1
     cycle_number: int = -1
+    action_bits: int = 0
+    cycle_progress: float = 0.0
 
     # -- status bits -------------------------------------------------------
 
@@ -236,6 +254,22 @@ class ModState:
         return bool(self.status & STATUS_MOD_ALIVE)
 
     @property
+    def in_shelter(self) -> bool:
+        return bool(self.game_flags & GAME_FLAG_IN_SHELTER)
+
+    @property
+    def cycle_survived(self) -> bool:
+        return bool(self.game_flags & GAME_FLAG_CYCLE_SURVIVED)
+
+    @property
+    def rain(self) -> bool:
+        return bool(self.game_flags & GAME_FLAG_RAIN)
+
+    @property
+    def dialog_open(self) -> bool:
+        return bool(self.game_flags & GAME_FLAG_DIALOG_OPEN)
+
+    @property
     def player_pos(self) -> Tuple[float, float]:
         return (self.player_x, self.player_y)
 
@@ -252,15 +286,19 @@ class ModState:
             self.frame_height & 0xFFFFFFFF,
             self.command & 0xFF,
             self.command_result & 0xFF,
+            self.game_flags & 0xFF,
             self.heartbeat & 0xFFFFFFFF,
             self.step_counter & 0xFFFFFFFF,
             self.karma & 0xFF,
             self.karma_cap & 0xFF,
             self.food & 0xFF,
+            self.food_max & 0xFF,
             float(self.player_x),
             float(self.player_y),
             int(self.room_index),
             int(self.cycle_number),
+            self.action_bits & 0xFFFFFFFF,
+            float(self.cycle_progress),
         )
 
     @classmethod
@@ -276,6 +314,7 @@ class ModState:
             "karma": self.karma,
             "karma_cap": self.karma_cap,
             "food": self.food,
+            "food_max": self.food_max,
             "player_pos": (self.player_x, self.player_y),
             "room_index": self.room_index,
             "cycle_number": self.cycle_number,
@@ -283,6 +322,11 @@ class ModState:
             "in_game": self.in_game,
             "ready": self.ready,
             "human_override": self.human_override,
+            "in_shelter": self.in_shelter,
+            "cycle_survived": self.cycle_survived,
+            "rain": self.rain,
+            "dialog_open": self.dialog_open,
+            "cycle_progress": self.cycle_progress,
         }
 
 

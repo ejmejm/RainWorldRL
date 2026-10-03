@@ -15,7 +15,7 @@ assemblies locked while the game runs.
 
 CLI::
 
-    python -m rainworld_rl.python.launcher [--no-build] [--no-restart] [--build-only]
+    python -m rainworld_rl.launcher [--no-build] [--no-restart] [--build-only]
                                            [--wait-ready] [--config PATH]
 """
 
@@ -336,7 +336,7 @@ def launch(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        prog = "python -m rainworld_rl.python.launcher",
+        prog = "python -m rainworld_rl.launcher",
         description = "Build, deploy and launch Rain World with the RainWorldRL mod (Steam must be running).",
     )
     parser.add_argument("--no-build", action = "store_true", help = "Skip dotnet build / DLL deploy")

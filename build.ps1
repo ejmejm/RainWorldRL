@@ -3,7 +3,7 @@
 # Reads game_dir from rainworld_rl.toml (repo root) if present, otherwise uses
 # the default Steam path. Passes it to MSBuild as RainWorldDir and copies the
 # built DLL into <game_dir>\BepInEx\plugins. Note the DLL is locked while the
-# game is running; close Rain World first (or use python -m rainworld_rl.python.launcher).
+# game is running; close Rain World first (or use python -m rainworld_rl.launcher).
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path

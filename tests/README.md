@@ -22,7 +22,7 @@ Run from the repo root (`E:\projects\rainworld_rl`); `pytest.ini` there sets the
 | `python -m pytest tests/e2e/test_stepping.py --e2e --no-launch -q -k counter` | One file / one test. |
 | `python -m pytest tests --e2e --collect-only -q` | Check that everything collects (no game needed). |
 
-The conftest imports `rainworld_rl.python.*` lazily inside fixtures, so collection never
+The conftest imports `rainworld_rl.*` lazily inside fixtures, so collection never
 fails while the client is being rewritten; a missing API module aborts the session with a
 clear message only when an e2e test actually runs.
 
@@ -57,7 +57,7 @@ Helpers in `tests/harness.py`:
 
 ## Adding a test
 
-1. Game-free? Put it in `tests/unit/`. It must not import `rainworld_rl.python` at module level
+1. Game-free? Put it in `tests/unit/`. It must not import `rainworld_rl` at module level
    unless it uses `pytest.importorskip`, so the suite keeps collecting while the client is unfinished.
 2. Needs the game? Put it in `tests/e2e/` - it is marked `e2e` and skipped without `--e2e` automatically.
    - Prefer `env` (shared, no reset). Use `fresh_env` only when you really need a wiped save.

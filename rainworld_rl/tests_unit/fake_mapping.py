@@ -21,7 +21,7 @@ from __future__ import annotations
 import struct
 from typing import List
 
-from rainworld_rl.python import shared_memory as sm
+from rainworld_rl import shared_memory as sm
 
 
 class FakeMapping(bytearray):

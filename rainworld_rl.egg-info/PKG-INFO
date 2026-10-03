@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: rainworld-rl
+Version: 0.3.0
+Summary: Rain World as a Gymnasium reinforcement learning environment (BepInEx mod + Python client)
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: gymnasium>=0.29.0
+Provides-Extra: render
+Requires-Dist: Pillow>=9.0.0; extra == "render"
+Provides-Extra: test
+Requires-Dist: pytest>=7.0; extra == "test"
+
 # Rain World RL
 
 This is a project to turn Rain World into a reinforcement learning environment.

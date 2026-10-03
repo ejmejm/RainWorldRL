@@ -1,14 +1,14 @@
 """
 pytest configuration for the Rain World RL test harness.
 
-* Puts the repo's parent directory on ``sys.path`` so ``rainworld_rl`` resolves
-  as a namespace package (``from rainworld_rl.python.rainworld_env import ...``).
+* Puts the repo root on ``sys.path`` so ``rainworld_rl`` resolves even without pip install
+  as a namespace package (``from rainworld_rl.rainworld_env import ...``).
 * Adds ``--e2e`` / ``--no-launch`` / ``--no-build``.
 * Marks everything under ``tests/e2e`` with ``e2e`` and skips it unless ``--e2e``.
 * Provides the session-scoped ``game`` fixture (launch or attach once) and the
   per-test ``env`` (shared, no reset) and ``fresh_env`` (``reset()`` first) fixtures.
 
-The ``rainworld_rl.python`` modules are imported lazily inside fixtures so that
+The ``rainworld_rl`` modules are imported lazily inside fixtures so that
 collection never fails while the client is being rewritten.
 """
 
@@ -22,10 +22,10 @@ import pytest
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
-REPO_PARENT = REPO_ROOT.parent  # makes `import rainworld_rl` work (namespace package)
+REPO_PARENT = REPO_ROOT.parent  # legacy; the package is now installed via pip install -e .
 E2E_DIR = TESTS_DIR / "e2e"
 
-for _p in (str(REPO_ROOT), str(REPO_PARENT)):
+for _p in (str(REPO_ROOT),):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -98,16 +98,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 # Lazy import of the client API
 # ---------------------------------------------------------------------------
 def import_api() -> SimpleNamespace:
-    """Import the rainworld_rl.python API; abort the session with a clear message if it is missing."""
+    """Import the rainworld_rl API; abort the session with a clear message if it is missing."""
     try:
-        from rainworld_rl.python.rainworld_env import RainWorldEnv
-        from rainworld_rl.python.launcher import launch, kill_game, LaunchError
-        from rainworld_rl.python import shared_memory
-        from rainworld_rl.python.shared_memory import SharedMemoryClient, GameNotRunningError
-    except ImportError as exc:  # pragma: no cover - depends on the python/ rewrite
+        from rainworld_rl.rainworld_env import RainWorldEnv
+        from rainworld_rl.launcher import launch, kill_game, LaunchError
+        from rainworld_rl import shared_memory
+        from rainworld_rl.shared_memory import SharedMemoryClient, GameNotRunningError
+    except ImportError as exc:  # pragma: no cover - depends on the package being importable
         pytest.exit(
-            f"Cannot import the rainworld_rl.python API needed for e2e tests: {exc}\n"
-            f"(sys.path contains {REPO_PARENT}; is the python/ rewrite complete?)",
+            f"Cannot import the rainworld_rl API needed for e2e tests: {exc}\n"
+            f"(sys.path contains {REPO_ROOT}; is the package installed? try: pip install -e .)",
             returncode=1,
         )
 
@@ -138,7 +138,7 @@ def e2e_options(request: pytest.FixtureRequest) -> SimpleNamespace:
 
 @pytest.fixture(scope="session")
 def api(e2e_options: SimpleNamespace) -> SimpleNamespace:
-    """The lazily imported rainworld_rl.python API (RainWorldEnv, launch, kill_game, ...)."""
+    """The lazily imported rainworld_rl API (RainWorldEnv, launch, kill_game, ...)."""
     if not e2e_options.e2e:
         pytest.skip("requires --e2e")
     return import_api()

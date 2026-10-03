@@ -10,9 +10,9 @@ import time
 import numpy as np
 import pytest
 
-from rainworld_rl.python import shared_memory as sm
-from rainworld_rl.python.rainworld_env import RainWorldEnv
-from rainworld_rl.python.shared_memory import ModState, SharedMemoryClient
+from rainworld_rl import shared_memory as sm
+from rainworld_rl.rainworld_env import RainWorldEnv
+from rainworld_rl.shared_memory import ModState, SharedMemoryClient
 
 from fake_mapping import FakeMapping
 
@@ -73,12 +73,16 @@ def test_header_pack_unpack_round_trip():
 def test_to_info_contains_expected_fields():
     state = ModState(status = sm.STATUS_PLAYER_DEAD | sm.STATUS_IN_GAME | sm.STATUS_READY,
                      karma = 2, karma_cap = 4, food = 1, player_x = 3.0, player_y = 4.0,
-                     room_index = 5, cycle_number = 6, step_counter = 7)
+                     room_index = 5, cycle_number = 6, step_counter = 7,
+                     food_max = 7, cycle_progress = 0.25,
+                     game_flags = sm.GAME_FLAG_IN_SHELTER | sm.GAME_FLAG_CYCLE_SURVIVED)
     info = state.to_info()
     assert info == {
-        "player_dead": True, "karma": 2, "karma_cap": 4, "food": 1,
+        "player_dead": True, "karma": 2, "karma_cap": 4, "food": 1, "food_max": 7,
         "player_pos": (3.0, 4.0), "room_index": 5, "cycle_number": 6,
         "step_counter": 7, "in_game": True, "ready": True, "human_override": False,
+        "in_shelter": True, "cycle_survived": True, "rain": False, "dialog_open": False,
+        "cycle_progress": 0.25,
     }
 
 
@@ -259,7 +263,7 @@ def test_step_waits_through_human_override_without_timing_out(caplog):
 
     t = threading.Thread(target = release_later)
     t.start()
-    with caplog.at_level(logging.INFO, logger = "rainworld_rl.python.shared_memory"):
+    with caplog.at_level(logging.INFO, logger = "rainworld_rl.shared_memory"):
         started = time.monotonic()
         frame, state = client.step(5, timeout = 0.1)   # timeout << override duration
         elapsed = time.monotonic() - started
@@ -386,6 +390,7 @@ def test_env_reset_sends_reset_and_returns_frame_and_info():
     assert set(info) == {
         "player_dead", "karma", "karma_cap", "food", "player_pos", "room_index",
         "cycle_number", "step_counter", "in_game", "ready", "human_override",
+        "food_max", "in_shelter", "cycle_survived", "rain", "dialog_open", "cycle_progress",
     }
     assert env.connected
 
@@ -447,4 +452,4 @@ def test_env_set_frame_dimensions_updates_space_and_frames():
 def test_gym_registration():
     import gymnasium as gym
     assert "RainWorld-v0" in gym.registry
-    assert gym.registry["RainWorld-v0"].entry_point == "rainworld_rl.python.rainworld_env:RainWorldEnv"
+    assert gym.registry["RainWorld-v0"].entry_point == "rainworld_rl.rainworld_env:RainWorldEnv"

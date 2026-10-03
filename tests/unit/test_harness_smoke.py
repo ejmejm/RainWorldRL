@@ -156,24 +156,24 @@ def fake():
 # Imports / wiring
 # ---------------------------------------------------------------------------
 def test_repo_parent_on_sys_path():
-    assert str(REPO_ROOT.parent) in sys.path
+    assert str(REPO_ROOT) in sys.path
     assert harness_conftest.REPO_PARENT == REPO_ROOT.parent
     assert callable(harness_conftest.step_n)
 
 
 def test_rainworld_namespace_package_resolves():
     """`rainworld_rl` must resolve to this repo (namespace package via the parent dir)."""
-    pkg = pytest.importorskip("rainworld_rl.python", reason="python/ package not importable yet")
-    assert Path(pkg.__file__).resolve().parent == (REPO_ROOT / "python").resolve()
+    pkg = pytest.importorskip("rainworld_rl", reason="rainworld_rl package not importable")
+    assert Path(pkg.__file__).resolve().parent == (REPO_ROOT / "rainworld_rl").resolve()
 
 
-@pytest.mark.xfail(strict=False, reason="python/ API rewrite may still be in progress")
+@pytest.mark.xfail(strict=False, reason="API surface check")
 def test_new_api_surface_exists():
     """Checks the API contract the e2e tests are written against (informational until the rewrite lands)."""
-    env_mod = importlib.import_module("rainworld_rl.python.rainworld_env")
-    launcher = importlib.import_module("rainworld_rl.python.launcher")
-    shm = importlib.import_module("rainworld_rl.python.shared_memory")
-    config = importlib.import_module("rainworld_rl.python.config")
+    env_mod = importlib.import_module("rainworld_rl.rainworld_env")
+    launcher = importlib.import_module("rainworld_rl.launcher")
+    shm = importlib.import_module("rainworld_rl.shared_memory")
+    config = importlib.import_module("rainworld_rl.config")
 
     for method in ("launch", "connect", "reset", "step", "close"):
         assert callable(getattr(env_mod.RainWorldEnv, method)), f"RainWorldEnv.{method} missing"

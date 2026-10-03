@@ -6,7 +6,7 @@ RainWorldRL mod (``env.connect()``). Pass ``--launch`` to build the mod,
 (re)start the game and connect (``env.launch()``; Steam must be running).
 
 Usage:
-    python -m rainworld_rl.python.test_env [--launch] [--no-wipe] [--steps N] ...
+    python -m rainworld_rl.test_env [--launch] [--no-wipe] [--steps N] ...
 """
 
 from __future__ import annotations
