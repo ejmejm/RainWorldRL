@@ -1,4 +1,5 @@
 using BepInEx;
+using BepInEx.Configuration;
 using System;
 using System.Security.Permissions;
 using UnityEngine;
@@ -9,27 +10,39 @@ using UnityEngine;
 
 /// <summary>
 /// Rain World RL - Turns Rain World into a reinforcement learning environment.
-/// Communicates with Python via shared memory for step-driven simulation.
+/// Communicates with Python via shared memory (protocol v2, docs/PROTOCOL.md).
+///
+/// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
+/// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
+/// save). F10 toggles HUMAN_OVERRIDE while RL mode is on.
 /// </summary>
-[BepInPlugin("rainworld.rl", "RainWorldRL", "0.1")]
+[BepInPlugin("rainworld.rl", "RainWorldRL", "0.2")]
 public class RainWorldRL : BaseUnityPlugin
 {
+    private const KeyCode HUMAN_OVERRIDE_KEY = KeyCode.F10;
+
     // Core components
     private SharedMemoryBridge sharedMemory;
     private InputInjector inputInjector;
     private FrameCapture frameCapture;
     private StepController stepController;
+    private SaveRedirector saveRedirector;
+    private GameFlowController gameFlow;
+
+    // Config
+    private ConfigEntry<string> cfgSlugcat;
+    private ConfigEntry<string> cfgSaveName;
+    private ConfigEntry<float> cfgSpeedMultiplier;
+    private ConfigEntry<bool> cfgVerboseLogging;
 
     // State
     private bool initialized = false;
-    private bool rlModeEnabled = false;
-
-    // Default frame dimensions (will be updated from shared memory)
-    private const int DEFAULT_FRAME_WIDTH = 160;
-    private const int DEFAULT_FRAME_HEIGHT = 90;
-
-    // Keybind for toggling RL mode
-    private const KeyCode TOGGLE_KEY = KeyCode.F10;
+    private bool hooksInstalled = false;
+    private bool modsInitHookSubscribed = false;
+    private bool stepControllerEnabled = false;
+    private bool humanOverride = false;
+    private bool lastConnected = false;
+    private RainWorld rainWorld;
 
     void Awake()
     {
@@ -37,29 +50,55 @@ public class RainWorldRL : BaseUnityPlugin
 
         try
         {
-            // Initialize shared memory bridge
+            cfgSlugcat = Config.Bind("General", "Slugcat", "White",
+                "Slugcat to play as in RL mode (ExtEnum name: White, Yellow, Red, or a DLC name such as Gourmand).");
+            cfgSaveName = Config.Bind("General", "SaveName", "default",
+                "Name of the isolated RL save profile. Stored under BepInEx/plugins/RainWorldRL/saves/<name>/.");
+            cfgSpeedMultiplier = Config.Bind("Simulation", "SpeedMultiplier", 50f,
+                new ConfigDescription("Game-time speed multiplier while a step is running.", new AcceptableValueRange<float>(1f, 1000f)));
+            cfgVerboseLogging = Config.Bind("Logging", "Verbose", false,
+                "Log every process switch and other high-frequency diagnostics.");
+
             sharedMemory = new SharedMemoryBridge();
             Logger.LogInfo("Shared memory bridge created");
 
-            // Initialize input injector
             inputInjector = new InputInjector();
-            Logger.LogInfo("Input injector created");
+            frameCapture = new FrameCapture(SharedMemoryBridge.DEFAULT_FRAME_WIDTH, SharedMemoryBridge.DEFAULT_FRAME_HEIGHT);
 
-            // Initialize frame capture with default dimensions
-            frameCapture = new FrameCapture(DEFAULT_FRAME_WIDTH, DEFAULT_FRAME_HEIGHT);
-            Logger.LogInfo($"Frame capture initialized ({DEFAULT_FRAME_WIDTH}x{DEFAULT_FRAME_HEIGHT})");
+            stepController = new StepController(sharedMemory, inputInjector, frameCapture, Logger)
+            {
+                SpeedMultiplier = cfgSpeedMultiplier.Value,
+                VerboseLogging = cfgVerboseLogging.Value,
+            };
 
-            // Initialize step controller
-            stepController = new StepController(sharedMemory, inputInjector, frameCapture);
-            Logger.LogInfo("Step controller created");
+            saveRedirector = new SaveRedirector(Logger)
+            {
+                SaveName = cfgSaveName.Value,
+            };
+
+            gameFlow = new GameFlowController(saveRedirector, sharedMemory, Logger)
+            {
+                SlugcatName = cfgSlugcat.Value,
+                VerboseLogging = cfgVerboseLogging.Value,
+            };
+
+            cfgSpeedMultiplier.SettingChanged += (s, e) => stepController.SpeedMultiplier = cfgSpeedMultiplier.Value;
+            cfgSlugcat.SettingChanged += (s, e) => gameFlow.SlugcatName = cfgSlugcat.Value;
+            cfgSaveName.SettingChanged += (s, e) => saveRedirector.SaveName = cfgSaveName.Value;
+            cfgVerboseLogging.SettingChanged += (s, e) =>
+            {
+                stepController.VerboseLogging = cfgVerboseLogging.Value;
+                gameFlow.VerboseLogging = cfgVerboseLogging.Value;
+            };
+
+            sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_MOD_ALIVE, true);
 
             initialized = true;
-            Logger.LogInfo("RainWorld RL initialized successfully");
+            Logger.LogInfo($"RainWorld RL initialized (slugcat={cfgSlugcat.Value}, save={cfgSaveName.Value}, speed={cfgSpeedMultiplier.Value}x)");
         }
         catch (Exception ex)
         {
-            Logger.LogError($"Failed to initialize RainWorld RL: {ex.Message}");
-            Logger.LogError(ex.StackTrace);
+            Logger.LogError($"Failed to initialize RainWorld RL: {ex}");
         }
     }
 
@@ -68,40 +107,89 @@ public class RainWorldRL : BaseUnityPlugin
         if (!initialized)
             return;
 
-        // Install input hooks
-        inputInjector.Install();
-        Logger.LogInfo("Input hooks installed");
+        // Install game hooks at the conventional time (after the game registered its ExtEnums).
+        if (!modsInitHookSubscribed)
+        {
+            On.RainWorld.OnModsInit += RainWorld_OnModsInit;
+            modsInitHookSubscribed = true;
+        }
 
-        // Subscribe to camera post-render event
         Camera.onPostRender += OnCameraPostRender;
-        Logger.LogInfo("Camera post-render hook installed");
-
-        Logger.LogInfo($"RainWorld RL ready - Press {TOGGLE_KEY} to toggle RL mode");
+        Logger.LogInfo($"RainWorld RL ready - connect from Python to enter RL mode; {HUMAN_OVERRIDE_KEY} toggles human override");
     }
 
     void OnDisable()
     {
-        DisableRLMode();
-
-        // Unsubscribe from camera post-render event
         Camera.onPostRender -= OnCameraPostRender;
-
-        if (inputInjector != null)
-        {
-            inputInjector.Uninstall();
-            Logger.LogInfo("Input hooks removed");
-        }
+        ForceStopRLMode("plugin disabled");
     }
 
     void OnDestroy()
     {
-        DisableRLMode();
+        ForceStopRLMode("plugin destroyed");
+        UninstallHooks();
 
-        // Cleanup
+        if (modsInitHookSubscribed)
+        {
+            On.RainWorld.OnModsInit -= RainWorld_OnModsInit;
+            modsInitHookSubscribed = false;
+        }
+
+        if (sharedMemory != null)
+        {
+            sharedMemory.UpdateStatusBits(SharedMemoryBridge.MOD_OWNED_STATUS_MASK, 0);
+            sharedMemory.Dispose();
+        }
         frameCapture?.Dispose();
-        sharedMemory?.Dispose();
 
         Logger.LogInfo("RainWorld RL cleaned up");
+    }
+
+    private void RainWorld_OnModsInit(On.RainWorld.orig_OnModsInit orig, RainWorld self)
+    {
+        orig(self);
+        rainWorld = self;
+        InstallHooks();
+    }
+
+    private void InstallHooks()
+    {
+        if (hooksInstalled)
+            return;
+
+        try
+        {
+            On.RainWorld.Update += RainWorld_Update;
+            inputInjector.Install();
+            saveRedirector.Install();
+            gameFlow.Install();
+            hooksInstalled = true;
+            Logger.LogInfo("Game hooks installed");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"Failed to install hooks: {ex}");
+        }
+    }
+
+    private void UninstallHooks()
+    {
+        if (!hooksInstalled)
+            return;
+
+        gameFlow?.Uninstall();
+        saveRedirector?.Uninstall();
+        inputInjector?.Uninstall();
+        On.RainWorld.Update -= RainWorld_Update;
+        hooksInstalled = false;
+        Logger.LogInfo("Game hooks removed");
+    }
+
+    private void RainWorld_Update(On.RainWorld.orig_Update orig, RainWorld self)
+    {
+        rainWorld = self;
+        stepController.OnRainWorldUpdate(self);
+        orig(self);
     }
 
     void Update()
@@ -109,77 +197,162 @@ public class RainWorldRL : BaseUnityPlugin
         if (!initialized)
             return;
 
-        // Check for toggle keybind
-        if (Input.GetKeyDown(TOGGLE_KEY))
+        sharedMemory.IncrementHeartbeat();
+
+        // Hot-reload friendliness: if we were loaded after OnModsInit already ran, install late.
+        if (!hooksInstalled)
         {
-            ToggleRLMode();
+            RainWorld rw = RWCustom.Custom.rainWorld;
+            if (rw != null && rw.processManager != null)
+            {
+                rainWorld = rw;
+                Logger.LogInfo("OnModsInit already passed; installing hooks now");
+                InstallHooks();
+            }
         }
 
-        if (!initialized || !rlModeEnabled)
+        if (rainWorld == null)
+            rainWorld = RWCustom.Custom.rainWorld;
+        if (rainWorld == null || rainWorld.processManager == null)
             return;
 
-        // Check for Python connection and process actions
-        stepController.ProcessUpdate();
+        // RL mode follows Python's CONNECTED bit
+        bool connected = sharedMemory.IsConnected;
+        if (connected != lastConnected)
+        {
+            lastConnected = connected;
+            Logger.LogInfo(connected ? "Python connected -> entering RL mode" : "Python disconnected -> exiting RL mode");
+            gameFlow.SetDesired(connected);
+        }
+
+        gameFlow.Update(rainWorld);
+
+        // Step controller + input override follow RL mode (including transitions)
+        bool rlActive = gameFlow.IsActive;
+        if (rlActive != stepControllerEnabled)
+        {
+            if (rlActive)
+            {
+                inputInjector.EnableOverride();
+                stepController.Enable();
+            }
+            else
+            {
+                stepController.Disable();
+                inputInjector.DisableOverride();
+                humanOverride = false;
+            }
+            stepControllerEnabled = rlActive;
+        }
+
+        // F10: human override (only meaningful in RL mode)
+        if (Input.GetKeyDown(HUMAN_OVERRIDE_KEY))
+        {
+            if (!rlActive)
+                Logger.LogInfo($"{HUMAN_OVERRIDE_KEY}: RL mode is off (no Python client connected); nothing to override");
+            else
+                SetHumanOverride(!humanOverride);
+        }
+
+        // Commands
+        byte command = sharedMemory.ReadCommand();
+        if (command == SharedMemoryBridge.CMD_RESET && !gameFlow.ResetInProgress)
+        {
+            if (!gameFlow.RequestReset())
+            {
+                Logger.LogWarning("RESET command received but RL mode is not fully on; reporting ERROR");
+                sharedMemory.WriteCommandResult(SharedMemoryBridge.RESULT_ERROR);
+                sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+            }
+        }
+        else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
+        {
+            Logger.LogWarning($"Unknown command {command}; reporting ERROR");
+            sharedMemory.WriteCommandResult(SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+        }
+
+        // Status bits (PLAYER_DEAD is written per step, MOD_ALIVE in Awake/OnDestroy)
+        byte bits = 0;
+        if (gameFlow.Ready) bits |= SharedMemoryBridge.STATUS_READY;
+        if (gameFlow.InGame) bits |= SharedMemoryBridge.STATUS_IN_GAME;
+        if (humanOverride) bits |= SharedMemoryBridge.STATUS_HUMAN_OVERRIDE;
+        sharedMemory.UpdateStatusBits(
+            (byte)(SharedMemoryBridge.STATUS_READY | SharedMemoryBridge.STATUS_IN_GAME | SharedMemoryBridge.STATUS_HUMAN_OVERRIDE),
+            bits);
+
+        // Freeze between steps only while the game is actually playable
+        stepController.HoldWhenIdle = gameFlow.Ready;
+
+        if (stepControllerEnabled)
+            stepController.ProcessUpdate();
     }
 
     void FixedUpdate()
     {
-        if (!initialized || !rlModeEnabled)
+        if (!initialized || !stepControllerEnabled)
             return;
 
-        // Track physics ticks
         stepController.ProcessFixedUpdate();
     }
 
     void OnCameraPostRender(Camera cam)
     {
-        if (!initialized || !rlModeEnabled)
+        if (!initialized || !stepControllerEnabled)
             return;
 
-        // Only capture from the main camera
-        if (cam != Camera.main)
+        // Capture from the main camera; fall back to any camera if none is tagged.
+        Camera main = Camera.main;
+        if (main != null && cam != main)
             return;
 
-        // Capture frame after rendering is complete
         stepController.ProcessPostRender();
     }
 
-    /// <summary>
-    /// Enables RL mode - step-driven simulation.
-    /// </summary>
-    public void EnableRLMode()
+    private void SetHumanOverride(bool value)
     {
-        if (!initialized || rlModeEnabled)
+        if (humanOverride == value)
             return;
 
-        inputInjector.EnableOverride();
-        stepController.Enable();
-        rlModeEnabled = true;
-        Logger.LogInfo("RL mode enabled - waiting for Python connection");
-    }
-
-    /// <summary>
-    /// Disables RL mode - returns to normal game.
-    /// </summary>
-    public void DisableRLMode()
-    {
-        if (!rlModeEnabled)
-            return;
-
-        inputInjector.DisableOverride();
-        stepController.Disable();
-        rlModeEnabled = false;
-        Logger.LogInfo("RL mode disabled");
-    }
-
-    /// <summary>
-    /// Toggles RL mode on/off.
-    /// </summary>
-    public void ToggleRLMode()
-    {
-        if (rlModeEnabled)
-            DisableRLMode();
+        humanOverride = value;
+        if (humanOverride)
+        {
+            stepController.SetPaused(true);
+            inputInjector.DisableOverride(); // keyboard passes through
+            Time.timeScale = 1f;
+            Logger.LogInfo("Human override ON - you have control; Python is waiting");
+        }
         else
-            EnableRLMode();
+        {
+            inputInjector.EnableOverride();
+            stepController.SetPaused(false);
+            Logger.LogInfo("Human override OFF - agent resumes");
+        }
+        sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_HUMAN_OVERRIDE, humanOverride);
+    }
+
+    /// <summary>
+    /// Best-effort synchronous teardown of RL mode (used when the plugin is disabled/destroyed and
+    /// the async exit state machine cannot run). The save swap cannot be completed here.
+    /// </summary>
+    private void ForceStopRLMode(string reason)
+    {
+        if (stepController != null && stepControllerEnabled)
+        {
+            stepController.Disable();
+            stepControllerEnabled = false;
+        }
+        inputInjector?.DisableOverride();
+        humanOverride = false;
+
+        if (gameFlow != null && gameFlow.IsActive)
+        {
+            gameFlow.SetDesired(false);
+            Logger.LogWarning($"RL mode force-stopped ({reason}). " +
+                (saveRedirector != null && saveRedirector.Active
+                    ? "The RL save is still the active progression; restart the game to return to the normal save."
+                    : ""));
+        }
+        lastConnected = false;
     }
 }
