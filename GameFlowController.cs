@@ -36,6 +36,17 @@ using UnityEngine;
 ///
 /// RESET: WipeAll on the RL progression, wait for the async re-read, WipeSaveState(slugcat), start a
 /// New story game, wait for Ready, then ack via command_result. Death is NOT a reset (nothing wiped).
+///
+/// Death flow: Player.Die (Player.cs:6690) -> RainWorldGame.GameOver (RainWorldGame.cs:1465) only
+/// puts the HUD into "game over" mode; the game stays current with the dead slugcat until a key is
+/// pressed, 40 ticks later at the earliest (HUD.TextPrompt.Update, TextPrompt.cs:205-245, reads
+/// Rewired directly so injected RL input cannot press it). In RL mode <see cref="UpdateGameOverAdvance"/>
+/// presses that key for the agent: after the same 40 ticks it calls RainWorldGame.GoToDeathScreen
+/// (RainWorldGame.cs:1914), which saves death-persistent data and requests DeathScreen - rewritten to
+/// Game/Load by the skip hook above, so the slugcat respawns in the start-of-cycle shelter.
+///
+/// KILL_PLAYER (debug command): <see cref="KillPlayer"/> calls Player.Die on a realized player 0 and
+/// the ordinary death flow above takes over. The ack only confirms the kill was applied.
 /// </summary>
 public class GameFlowController
 {
@@ -63,6 +74,13 @@ public class GameFlowController
     private const int AUTO_START_MAX_ATTEMPTS = 5;
     private const float RESET_TIMEOUT_SECONDS = 55f;
 
+    /// <summary>
+    /// Game ticks between the game-over prompt appearing and the restart key being accepted
+    /// (TextPrompt.EnterGameOverMode sets restartNotAllowed = 40, TextPrompt.cs:497). Mirrored here
+    /// because that field is private.
+    /// </summary>
+    private const int GAME_OVER_ADVANCE_TICKS = 40;
+
     private readonly SaveRedirector saves;
     private readonly SharedMemoryBridge sharedMemory;
     private readonly ManualLogSource log;
@@ -83,6 +101,11 @@ public class GameFlowController
     private ResetState resetState = ResetState.None;
     private RainWorldGame resetOldGame = null;
     private float resetStartTime = 0f;
+
+    // Game-over auto-advance bookkeeping (per RainWorldGame instance)
+    private RainWorldGame gameOverGame = null;
+    private int gameOverClock = 0;
+    private bool gameOverAdvanced = false;
 
     /// <summary>Slugcat to play as, by ExtEnum name (e.g. "White", "Yellow", "Red").</summary>
     public string SlugcatName { get; set; } = "White";
@@ -235,6 +258,58 @@ public class GameFlowController
         return true;
     }
 
+    /// <summary>
+    /// Debug KILL_PLAYER command: kills player 0 right now, on the calling (main) thread, via
+    /// Player.Die (Player.cs:6690). That runs RainWorldGame.GameOver (HUD game-over prompt) and
+    /// Creature.Die (sets Creature.dead and the abstract state's alive = false, Creature.cs:926/976),
+    /// so the next step reports the PLAYER_DEAD edge; the respawn happens later through
+    /// <see cref="UpdateGameOverAdvance"/>. Returns true only when the player is dead afterwards.
+    /// Returns false (caller reports ERROR) when RL mode is not fully on, a reset is in progress,
+    /// no story game with a realized, in-room player 0 is current, or the player is already dead.
+    /// </summary>
+    public bool KillPlayer(RainWorld rw)
+    {
+        if (state != FlowState.On || resetState != ResetState.None || rw == null)
+        {
+            log?.LogWarning("[GameFlow] KILL_PLAYER rejected: RL mode not fully on or a RESET is in progress");
+            return false;
+        }
+
+        ProcessManager pm = rw.processManager;
+        if (!IsInStoryGame(pm))
+        {
+            log?.LogWarning("[GameFlow] KILL_PLAYER rejected: no story game is current (or a process switch is pending)");
+            return false;
+        }
+
+        RainWorldGame game = pm.currentMainLoop as RainWorldGame;
+        AbstractCreature abstractPlayer = GetPlayer0(pm);
+        Player player = abstractPlayer?.realizedCreature as Player;
+        if (player == null || player.room == null)
+        {
+            log?.LogWarning("[GameFlow] KILL_PLAYER rejected: player 0 is not realized in a room");
+            return false;
+        }
+        if (player.dead || game.GameOverModeActive)
+        {
+            log?.LogWarning("[GameFlow] KILL_PLAYER rejected: player 0 is already dead");
+            return false;
+        }
+
+        SaveState save = game.GetStorySession?.saveState;
+        log?.LogInfo($"[GameFlow] KILL_PLAYER: killing player 0 in room {player.room.abstractRoom?.name} " +
+                     $"(cycle {save?.cycleNumber}, karma {save?.deathPersistentSaveData?.karma})");
+        player.Die();
+
+        if (!player.dead)
+        {
+            // Player.Die returns early without dying when setupValues.invincibility is set.
+            log?.LogWarning("[GameFlow] KILL_PLAYER: Player.Die() did not kill the player (invincibility?)");
+            return false;
+        }
+        return true;
+    }
+
     /// <summary>True when a story RainWorldGame is current and no process switch is pending.</summary>
     public static bool IsInStoryGame(ProcessManager pm)
     {
@@ -317,9 +392,14 @@ public class GameFlowController
                         break;
                     }
                     if (resetState != ResetState.None)
+                    {
                         UpdateReset(rw, pm);
+                    }
                     else
+                    {
                         UpdateAutoNavigate(rw, pm);
+                        UpdateGameOverAdvance(pm);
+                    }
                     break;
 
                 case FlowState.ExitingLeaveGame:
@@ -480,6 +560,45 @@ public class GameFlowController
 
         log?.LogWarning($"[GameFlow] Unknown slugcat '{name}', falling back to White");
         return SlugcatStats.Name.White;
+    }
+
+    // ------------------------------------------------------------------ game over -> respawn
+
+    /// <summary>
+    /// Stands in for the "press SPACE to restart" key while the HUD is in game-over mode
+    /// (RainWorldGame.GameOverModeActive). TextPrompt.Update only accepts that key once
+    /// restartNotAllowed (40 ticks) has run down and reads the keyboard through Rewired, which the
+    /// RL input override does not reach - so without this the agent would be stuck stepping a dead
+    /// slugcat forever. After the same 40 game ticks (RainWorldGame.clock) this calls
+    /// GoToDeathScreen exactly once per game instance; the skip hook turns the DeathScreen request
+    /// into Game/Load, i.e. a respawn.
+    /// </summary>
+    private void UpdateGameOverAdvance(ProcessManager pm)
+    {
+        RainWorldGame game = pm.currentMainLoop as RainWorldGame;
+        if (game == null || !game.IsStorySession || !game.GameOverModeActive)
+        {
+            gameOverGame = null;
+            return;
+        }
+
+        if (!ReferenceEquals(game, gameOverGame))
+        {
+            gameOverGame = game;
+            gameOverClock = game.clock;
+            gameOverAdvanced = false;
+            log?.LogInfo($"[GameFlow] Game over prompt active; advancing to the death screen in {GAME_OVER_ADVANCE_TICKS} ticks");
+            return;
+        }
+
+        if (gameOverAdvanced || pm.upcomingProcess != null)
+            return;
+        if (game.clock - gameOverClock < GAME_OVER_ADVANCE_TICKS)
+            return;
+
+        gameOverAdvanced = true;
+        log?.LogInfo("[GameFlow] Game over -> GoToDeathScreen (DeathScreen is skipped; respawning)");
+        game.GoToDeathScreen();
     }
 
     // ------------------------------------------------------------------ reset

@@ -14,7 +14,7 @@ Header layout (all little-endian)::
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
-    12     1    py->mod command         0 NONE, 1 RESET
+    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
     14     2    -       reserved
     16     4    mod->py heartbeat       uint32, bumped every Unity Update
@@ -839,6 +839,24 @@ class SharedMemoryClient:
         if self._read_byte(OFFSET_SYNC_FLAG) == SYNC_FRAME_READY:
             self._write_byte(OFFSET_SYNC_FLAG, SYNC_IDLE)
         self.send_command(COMMAND_RESET, timeout = timeout)
+        return self.read_state()
+
+    def kill_player(self, timeout: float = 10.0) -> ModState:
+        """
+        Send ``KILL_PLAYER`` - a **debug/testing** command that kills player 0.
+
+        The mod applies the kill synchronously and acks as soon as the slugcat
+        is dead; it does *not* wait for the respawn. The next ``step()`` reports
+        the ``PLAYER_DEAD`` edge, then (after the game's ~40-tick game-over
+        prompt) the mod skips the death screen and reloads the cycle, during
+        which ``READY`` drops and steps return menu/loading frames.
+
+        Raises:
+            CommandError: the mod reported ERROR (RL mode not fully on, no live
+                player 0, player already dead) or did not ack within ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_KILL_PLAYER, timeout = timeout)
         return self.read_state()
 
     # -- misc --------------------------------------------------------------

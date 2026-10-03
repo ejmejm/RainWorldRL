@@ -81,7 +81,15 @@ until nonzero (timeout ~60s). The mod performs the command on the main thread, w
 `command_result`, then writes `command = NONE`. RESET = delete the RL save directory
 contents, start a fresh story game as the configured slugcat, wait until `READY`, then ack.
 KILL_PLAYER = kill player 0 immediately (the following step reports the `PLAYER_DEAD` edge and the
-normal respawn flow runs); ack once the kill has been applied.
+normal respawn flow runs); ack once the kill has been applied (`ERROR` if RL mode is not fully on,
+no realized player 0 exists, or it is already dead). The ack never waits for the respawn.
+
+Death -> respawn (any death, not just KILL_PLAYER): the game only leaves its "game over" prompt on a
+key press that injected RL input cannot produce, so while RL mode is on the mod presses it itself
+40 ticks after the prompt appears (the game's own minimum) and the death screen is skipped straight
+into a reload of the cycle. From Python: one step with `PLAYER_DEAD`, then `READY` drops for a
+number of steps (steps are still serviced, fields zero/-1), then `READY` returns in the
+start-of-cycle shelter.
 
 ## Connect handshake (Python side)
 
