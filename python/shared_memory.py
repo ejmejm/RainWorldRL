@@ -2,7 +2,9 @@
 Shared memory client for communicating with the Rain World RL mod.
 
 Memory Layout:
-    Offset 0:  1 byte  - Sync flag (0=idle, 1=action_ready, 2=frame_ready)
+    Offset 0:  1 byte  - Sync flag (0=idle, 1=action_ready, 2=frame_ready, 3=processing)
+                         Python: idle -> action_ready. Mod: action_ready -> processing -> frame_ready.
+                         Python: frame_ready -> idle after reading the frame.
     Offset 1:  1 byte  - Action bitfield
     Offset 2:  1 byte  - Ticks per step
     Offset 3:  1 byte  - Status flags
@@ -29,6 +31,7 @@ TOTAL_SIZE = HEADER_SIZE + MAX_FRAME_SIZE
 SYNC_IDLE = 0
 SYNC_ACTION_READY = 1
 SYNC_FRAME_READY = 2
+SYNC_PROCESSING = 3
 
 # Memory offsets
 OFFSET_SYNC_FLAG = 0
@@ -342,7 +345,8 @@ class SharedMemoryClient:
 
                 return frame
 
-            # Small sleep to avoid busy-waiting
+            # Flag is ACTION_READY (mod hasn't picked it up yet) or PROCESSING
+            # (step running) - keep waiting. Small sleep to avoid busy-waiting.
             time.sleep(0.0001)
 
         return None

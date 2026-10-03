@@ -17,11 +17,6 @@ public class InputInjector
     public int HorizontalAxis { get; set; } // -1 = left, 0 = none, 1 = right
     public int VerticalAxis { get; set; }   // -1 = down, 0 = none, 1 = up
 
-    // Previous frame state for edge detection
-    private bool prevJump;
-    private bool prevGrab;
-    private bool prevThrow;
-
     public bool IsInstalled => installed;
     public bool IsOverrideActive => overrideActive;
 
@@ -90,16 +85,6 @@ public class InputInjector
         Throw = false;
         HorizontalAxis = 0;
         VerticalAxis = 0;
-    }
-
-    /// <summary>
-    /// Updates the previous frame state. Call this after input has been consumed.
-    /// </summary>
-    public void UpdatePreviousState()
-    {
-        prevJump = Jump;
-        prevGrab = Grab;
-        prevThrow = Throw;
     }
 
     /// <summary>

@@ -4,6 +4,13 @@ using UnityEngine;
 /// <summary>
 /// Controls the game simulation step-by-step, driven by Python RL agent.
 /// Runs physics as fast as possible, pausing between steps to wait for Python.
+///
+/// Step lifecycle (sync flag transitions):
+///   Python writes action + ACTION_READY
+///   -> ProcessUpdate consumes action once, writes PROCESSING, unpauses
+///   -> ProcessFixedUpdate counts ticks, pauses when ticksPerStep reached
+///   -> ProcessPostRender captures frame, writes status, writes FRAME_READY
+///   -> Python reads frame, writes IDLE
 /// </summary>
 public class StepController
 {
@@ -18,7 +25,12 @@ public class StepController
     private bool enabled = false;
     private int currentTick = 0;
     private int ticksPerStep = 1;
-    private bool waitingForFrameCapture = false;
+    private bool stepInProgress = false;      // Action consumed, physics running
+    private bool waitingForFrameCapture = false; // Physics done, awaiting post-render
+
+    // Cached game instance (set by the RainWorld.Update hook)
+    private RainWorld rainWorld;
+    private bool deathCheckErrorLogged = false;
 
     // Original settings to restore on disable
     private float originalTimeScale;
@@ -62,6 +74,10 @@ public class StepController
 
         // Install hook to bypass Rain World's FPS cap
         InstallSpeedHooks();
+
+        currentTick = 0;
+        stepInProgress = false;
+        waitingForFrameCapture = false;
 
         enabled = true;
         Debug.Log("[StepController] RL mode enabled - waiting for Python");
@@ -107,10 +123,12 @@ public class StepController
     }
 
     /// <summary>
-    /// Hook to bypass Rain World's internal FPS cap.
+    /// Hook to bypass Rain World's internal FPS cap and cache the game instance.
     /// </summary>
     private void RainWorld_Update(On.RainWorld.orig_Update orig, RainWorld self)
     {
+        rainWorld = self;
+
         if (enabled)
         {
             // Set FPS cap to unlimited (3 = unlimited in Rain World options)
@@ -121,19 +139,17 @@ public class StepController
     }
 
     /// <summary>
-    /// Called every Unity Update. Checks for actions and processes steps.
+    /// Called every Unity Update. Consumes a pending action (once per step) and
+    /// starts physics running.
     /// </summary>
     public bool ProcessUpdate()
     {
         if (!enabled)
             return false;
 
-        // Don't accept new action until previous frame is captured
-        if (waitingForFrameCapture)
-        {
-            Time.timeScale = 0f;
+        // A step is already running or awaiting capture - nothing to consume
+        if (stepInProgress || waitingForFrameCapture)
             return false;
-        }
 
         // Check if Python has sent an action
         if (!sharedMemory.IsActionReady())
@@ -142,15 +158,16 @@ public class StepController
             return false;
         }
 
-        // Action ready - run physics at high speed
-        Time.timeScale = SPEED_MULTIPLIER;
-
-        // Read action and ticks from shared memory
+        // Consume the action exactly once
         byte action = sharedMemory.ReadAction();
         ticksPerStep = sharedMemory.ReadTicksPerStep();
+        sharedMemory.SignalProcessing();
 
-        // Apply action to input system
         inputInjector.SetFromActionByte(action);
+
+        currentTick = 0;
+        stepInProgress = true;
+        Time.timeScale = SPEED_MULTIPLIER;
 
         return true;
     }
@@ -160,7 +177,7 @@ public class StepController
     /// </summary>
     public bool ProcessFixedUpdate()
     {
-        if (!enabled || Time.timeScale == 0f)
+        if (!enabled || !stepInProgress || Time.timeScale == 0f)
             return false;
 
         currentTick++;
@@ -171,6 +188,7 @@ public class StepController
         if (stepComplete)
         {
             Time.timeScale = 0f;
+            stepInProgress = false;
             waitingForFrameCapture = true;
         }
 
@@ -185,35 +203,59 @@ public class StepController
         if (!enabled || !waitingForFrameCapture)
             return;
 
-        if (currentTick >= ticksPerStep)
+        // Update frame dimensions if changed
+        sharedMemory.ReadFrameDimensions();
+        if (frameCapture.Width != sharedMemory.FrameWidth ||
+            frameCapture.Height != sharedMemory.FrameHeight)
         {
-            // Update frame dimensions if changed
-            sharedMemory.ReadFrameDimensions();
-            if (frameCapture.Width != sharedMemory.FrameWidth ||
-                frameCapture.Height != sharedMemory.FrameHeight)
-            {
-                frameCapture.Resize(sharedMemory.FrameWidth, sharedMemory.FrameHeight);
-            }
-
-            // Capture and send frame
-            byte[] frameData = frameCapture.CaptureFrameFlipped();
-            sharedMemory.WriteFrameData(frameData);
-            sharedMemory.SignalFrameReady();
-
-            // Reset for next step
-            currentTick = 0;
-            waitingForFrameCapture = false;
-
-            inputInjector.UpdatePreviousState();
+            frameCapture.Resize(sharedMemory.FrameWidth, sharedMemory.FrameHeight);
         }
+
+        // Capture and send frame
+        byte[] frameData = frameCapture.CaptureFrameFlipped();
+        sharedMemory.WriteFrameData(frameData);
+
+        // Status flags
+        sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_PLAYER_DEAD, IsPlayerDead());
+
+        sharedMemory.SignalFrameReady();
+
+        // Reset for next step
+        currentTick = 0;
+        waitingForFrameCapture = false;
     }
 
     /// <summary>
-    /// Resets the tick counter and state.
+    /// Returns true if player 0 is dead. Returns false when no game is running
+    /// (e.g. in a menu) or the player is not present.
     /// </summary>
-    public void ResetTicks()
+    private bool IsPlayerDead()
     {
-        currentTick = 0;
-        waitingForFrameCapture = false;
+        try
+        {
+            RainWorldGame game = rainWorld?.processManager?.currentMainLoop as RainWorldGame;
+            if (game == null || game.Players == null || game.Players.Count == 0)
+                return false;
+
+            AbstractCreature abstractPlayer = game.Players[0];
+            if (abstractPlayer == null)
+                return false;
+
+            // The abstract state persists even when the creature is not realized
+            if (abstractPlayer.state != null && abstractPlayer.state.dead)
+                return true;
+
+            Player player = abstractPlayer.realizedCreature as Player;
+            return player != null && player.dead;
+        }
+        catch (Exception ex)
+        {
+            if (!deathCheckErrorLogged)
+            {
+                Debug.LogError($"[StepController] Death check failed: {ex.Message}");
+                deathCheckErrorLogged = true;
+            }
+            return false;
+        }
     }
 }

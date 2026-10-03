@@ -131,15 +131,6 @@ public class RainWorldRL : BaseUnityPlugin
         stepController.ProcessFixedUpdate();
     }
 
-    void LateUpdate()
-    {
-        if (!initialized || !rlModeEnabled)
-            return;
-
-        // This is called after all Update and FixedUpdate calls
-        // We use this for frame capture timing
-    }
-
     void OnCameraPostRender(Camera cam)
     {
         if (!initialized || !rlModeEnabled)
