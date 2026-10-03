@@ -323,6 +323,52 @@ def test_reset_discards_stale_frame_ready():
     assert mapping.header().sync_flag == sm.SYNC_IDLE
 
 
+def test_kill_player_command_is_acked_and_next_step_reports_death_edge():
+    mapping = FakeMapping()
+    client = make_client(mapping)
+    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+    mapping.put(sm.OFFSET_COMMAND_RESULT, bytes((sm.COMMAND_RESULT_OK,)))  # stale result is cleared first
+
+    state = client.kill_player(timeout = 1.0)
+
+    assert mapping.commands_received == [sm.COMMAND_KILL_PLAYER]
+    assert state.command == sm.COMMAND_NONE
+    assert state.command_result == sm.COMMAND_RESULT_OK
+    assert mapping.steps_serviced == []            # the ack does not step the game
+
+    _frame, s1 = client.step(0, 1, timeout = 1.0)
+    _frame, s2 = client.step(0, 1, timeout = 1.0)
+    assert s1.player_dead is True                  # edge on the step after the kill ...
+    assert s2.player_dead is False                 # ... and only that step
+
+
+def test_kill_player_error_raises():
+    mapping = FakeMapping()
+    mapping.fail_commands = True
+    client = make_client(mapping)
+    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+    with pytest.raises(sm.CommandError, match = "error"):
+        client.kill_player(timeout = 1.0)
+
+
+def test_kill_player_rejected_when_not_ready():
+    mapping = FakeMapping(auto_ready = False)      # mod never enters the game -> no player to kill
+    client = make_client(mapping)
+    client.connect(wait_ready = False, liveness_timeout = 0.1)
+    with pytest.raises(sm.CommandError, match = "error"):
+        client.kill_player(timeout = 1.0)
+    assert mapping.commands_received == [sm.COMMAND_KILL_PLAYER]
+
+
+def test_kill_player_timeout_raises():
+    mapping = FakeMapping()
+    mapping.service_commands = False
+    client = make_client(mapping)
+    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+    with pytest.raises(sm.CommandError, match = "not acknowledged"):
+        client.kill_player(timeout = 0.05)
+
+
 def test_operations_require_connection():
     client = make_client(FakeMapping())
     with pytest.raises(sm.NotConnectedError):
@@ -331,6 +377,8 @@ def test_operations_require_connection():
         client.wait_for_frame(0.01)
     with pytest.raises(sm.NotConnectedError):
         client.reset_game(0.01)
+    with pytest.raises(sm.NotConnectedError):
+        client.kill_player(0.01)
 
 
 def test_frame_dimension_validation():
@@ -430,6 +478,36 @@ def test_env_step_never_terminates_and_reports_death_in_info():
     env.close()
     assert not env.connected
     assert not mapping.header().connected
+
+
+def test_env_debug_kill_sends_command_and_death_edge_is_one_step():
+    mapping = FakeMapping()
+    env = make_env(mapping)
+    env.reset()
+    steps_before = len(mapping.steps_serviced)
+
+    env.debug_kill()
+
+    assert mapping.commands_received == [sm.COMMAND_RESET, sm.COMMAND_KILL_PLAYER]
+    assert len(mapping.steps_serviced) == steps_before   # debug_kill() itself never steps
+
+    _, _, terminated, truncated, info1 = env.step(0)
+    _, _, _, _, info2 = env.step(0)
+    assert info1["player_dead"] is True and terminated is False and truncated is False
+    assert info2["player_dead"] is False                  # continual env: death is an edge, not an end
+
+
+def test_env_debug_kill_requires_connection_and_propagates_command_error():
+    env = make_env(FakeMapping())
+    with pytest.raises(sm.GameNotRunningError):
+        env.debug_kill()
+
+    mapping = FakeMapping()
+    env = make_env(mapping)
+    env.reset()
+    mapping.fail_commands = True
+    with pytest.raises(sm.CommandError):
+        env.debug_kill(timeout = 0.2)
 
 
 def test_env_step_before_connect_raises():
