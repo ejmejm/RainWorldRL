@@ -8,10 +8,12 @@ import numpy as np
 import pytest
 
 from tests.harness import (
-    ACTION_LEFT,
-    ACTION_NOOP,
-    ACTION_RIGHT,
+    LEFT,
+    MAP,
+    NOOP,
+    RIGHT,
     assert_info_contract,
+    bits_to_vector,
     infos,
     step_n,
 )
@@ -57,11 +59,37 @@ def test_frame_shape_and_dtype(env):
 
 
 def test_frames_change_with_alternating_actions(env):
-    (first, _info), = step_n(env, 1, lambda i: ACTION_NOOP)
+    (first, _info), = step_n(env, 1, lambda i: NOOP)
     first = np.array(first, copy=True)  # the env may reuse its buffer
-    results = step_n(env, 50, lambda i: ACTION_LEFT if i % 2 == 0 else ACTION_RIGHT)
+    results = step_n(env, 50, lambda i: LEFT if i % 2 == 0 else RIGHT)
     differing = [i for i, (obs, _info) in enumerate(results) if np.any(obs != first)]
     assert differing, "none of 50 frames differed from the first - is the game actually advancing?"
+
+
+def test_step_accepts_multibinary_vectors_and_sampled_actions(env):
+    """The native action space is MultiBinary; vectors, numpy samples and int bitmasks all work."""
+    import gymnasium.spaces as spaces
+
+    assert isinstance(env.action_space, spaces.MultiBinary)
+    assert env.action_space.shape == (len(bits_to_vector(0)),)
+
+    results = step_n(env, 3, lambda i: bits_to_vector(RIGHT))        # python list
+    results += step_n(env, 3, lambda i: np.array(bits_to_vector(RIGHT), dtype=np.int8))  # ndarray
+    results += step_n(env, 5, lambda i: env.action_space.sample())  # random key combos
+    results += step_n(env, 2, lambda i: RIGHT)                       # int bitmask
+    _assert_consecutive([int(c) for c in infos(results, "step_counter")])
+    for _obs, info in results:
+        assert_info_contract(info)
+
+
+def test_map_key_does_not_break_stepping(env):
+    """Holding MAP opens the in-game map overlay; steps must keep being serviced and the game must stay up."""
+    results = step_n(env, 30, lambda i: MAP)
+    results += step_n(env, 10)  # release
+    _assert_consecutive([int(c) for c in infos(results, "step_counter")])
+    assert all(bool(v) for v in infos(results, "in_game"))
+    assert "dialog_open" in results[-1][1]
+    assert not results[-1][1]["dialog_open"], "no prompt should be open after releasing the map key"
 
 
 @pytest.mark.xfail(
@@ -77,9 +105,9 @@ def test_player_pos_responds_to_direction(env):
     x0 = float(settled["player_pos"][0])
     room0 = settled["room_index"]
 
-    right = step_n(env, hold, lambda i: ACTION_RIGHT)
+    right = step_n(env, hold, lambda i: RIGHT)
     x_right = float(right[-1][1]["player_pos"][0])
-    left = step_n(env, hold, lambda i: ACTION_LEFT)
+    left = step_n(env, hold, lambda i: LEFT)
     x_left = float(left[-1][1]["player_pos"][0])
 
     rooms = {room0, right[-1][1]["room_index"], left[-1][1]["room_index"]}
