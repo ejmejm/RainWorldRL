@@ -28,7 +28,9 @@ using System.IO.MemoryMappedFiles;
 ///   40  i32  cycle_number     (-1 if unavailable)
 ///   44  u32  action_bits      py->mod v3 action bitfield (bit list in PROTOCOL.md)
 ///   48  f32  cycle_progress   mod->py fraction of the cycle elapsed (0..1, >1 once rain starts)
-///   52  12B  reserved
+///   52  u8   food_to_hibernate mod->py pips needed to hibernate this cycle (= food_max while malnourished)
+///   53  u8   malnourished     mod->py level: 1 while the save state is malnourished (last sleep was a starving one)
+///   54  10B  reserved
 ///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
@@ -77,6 +79,8 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_CYCLE_NUMBER = 40;
     private const int OFFSET_ACTION_BITS = 44;
     private const int OFFSET_CYCLE_PROGRESS = 48;
+    private const int OFFSET_FOOD_TO_HIBERNATE = 52;
+    private const int OFFSET_MALNOURISHED = 53;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
     // Action bitfield masks
@@ -99,6 +103,10 @@ public class SharedMemoryBridge : IDisposable
     public const byte GAME_FLAG_CYCLE_SURVIVED = 0x02;  // edge: hibernation succeeded this step
     public const byte GAME_FLAG_RAIN = 0x04;            // level
     public const byte GAME_FLAG_DIALOG_OPEN = 0x08;     // level: text/dialog overlay awaits input
+
+    /// <summary>game_flags bits derived from per-step game state (cleared by <see cref="ClearGameState"/>).
+    /// DIALOG_OPEN is owned by the dialog tracking code and is left alone.</summary>
+    public const byte GAME_STATE_FLAGS_MASK = GAME_FLAG_IN_SHELTER | GAME_FLAG_CYCLE_SURVIVED | GAME_FLAG_RAIN;
 
     /// <summary>Bits the mod is allowed to write. Everything else belongs to Python.</summary>
     public const byte MOD_OWNED_STATUS_MASK =
@@ -126,6 +134,7 @@ public class SharedMemoryBridge : IDisposable
         WriteSyncFlag(SYNC_IDLE);
         UpdateStatusBits(MOD_OWNED_STATUS_MASK, 0);
         WriteCommandResult(RESULT_NONE);
+        WriteGameFlags(0);
         ClearGameState();
     }
 
@@ -247,19 +256,39 @@ public class SharedMemoryBridge : IDisposable
         if (next != current) WriteGameFlags(next);
     }
 
+    /// <summary>Read-modify-write of several game_flags bits at once: the bits in
+    /// <paramref name="mask"/> take the corresponding bits of <paramref name="value"/>.</summary>
+    public void SetGameFlags(byte mask, byte value)
+    {
+        byte current = ReadGameFlags();
+        byte next = (byte)((current & ~mask) | (value & mask));
+        if (next != current) WriteGameFlags(next);
+    }
+
     /// <summary>Writes the slugcat's maximum food pips (offset 27).</summary>
     public void WriteFoodMax(int foodMax) => accessor.Write(OFFSET_FOOD_MAX, ClampByte(foodMax));
 
     /// <summary>Writes the fraction of the rain cycle elapsed (offset 48).</summary>
     public void WriteCycleProgress(float progress) => accessor.Write(OFFSET_CYCLE_PROGRESS, progress);
 
-    /// <summary>Writes the "unavailable" values for all game-state fields.</summary>
+    /// <summary>Writes the food pips needed to hibernate this cycle (offset 52).</summary>
+    public void WriteFoodToHibernate(int pips) => accessor.Write(OFFSET_FOOD_TO_HIBERNATE, ClampByte(pips));
+
+    /// <summary>Writes the malnourished level flag (offset 53).</summary>
+    public void WriteMalnourished(bool malnourished) => accessor.Write(OFFSET_MALNOURISHED, malnourished ? (byte)1 : (byte)0);
+
+    /// <summary>
+    /// Writes the "unavailable" values for all game-state fields. Only the game-state bits of
+    /// game_flags (<see cref="GAME_STATE_FLAGS_MASK"/>) are cleared; other bits keep their owner's value.
+    /// </summary>
     public void ClearGameState()
     {
         WriteGameState(0, 0, 0, 0f, 0f, -1, -1);
-        WriteGameFlags(0);
+        SetGameFlags(GAME_STATE_FLAGS_MASK, 0);
         WriteFoodMax(0);
         WriteCycleProgress(0f);
+        WriteFoodToHibernate(0);
+        WriteMalnourished(false);
     }
 
     private static byte ClampByte(int v)
