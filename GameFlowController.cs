@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using BepInEx.Logging;
 using UnityEngine;
 
@@ -36,6 +37,11 @@ using UnityEngine;
 ///
 /// RESET: WipeAll on the RL progression, wait for the async re-read, WipeSaveState(slugcat), start a
 /// New story game, wait for Ready, then ack via command_result. Death is NOT a reset (nothing wiped).
+///
+/// Fade skipping (RL mode on only): every RequestMainProcessSwitch fade-out is clamped to
+/// SKIP_SCREEN_FADE_SECONDS, and the fade-from-black that a new RainWorldGame starts with is collapsed in
+/// PostSwitchMainProcess (see <see cref="SkipGameFadeIn"/>), so the agent sees the room from its first step
+/// instead of 2-5 s of black frames.
 /// </summary>
 public class GameFlowController
 {
@@ -58,16 +64,34 @@ public class GameFlowController
         WaitForNewGame,
     }
 
+    /// <summary>Fade-to-black length for every process switch while RL mode is on (game default 0.45 s).</summary>
     private const float SKIP_SCREEN_FADE_SECONDS = 0.05f;
+    /// <summary>Remaining fade-from-black (ProcessManager.blackFadeTime) forced on a new RainWorldGame.</summary>
+    private const float GAME_FADE_IN_SECONDS = 0.05f;
+    /// <summary>
+    /// fadeToBlack value forced on a new RainWorldGame: small but positive, so ProcessManager.Update still
+    /// takes its "fadeToBlack > 0" branch once and tears the fade sprite + Loading label down cleanly.
+    /// </summary>
+    private const float GAME_FADE_IN_REMAINDER = 0.001f;
     private const float AUTO_START_RETRY_SECONDS = 3f;
     private const int AUTO_START_MAX_ATTEMPTS = 5;
     private const float RESET_TIMEOUT_SECONDS = 55f;
+
+    // ProcessManager keeps the fade-in timing in private fields and has no hookable getters for
+    // MainLoopProcess.FadeInTime / InitialBlackSeconds (ProcessManager.cs 205-207, 1158-1159).
+    private static readonly FieldInfo pmBlackDelay =
+        typeof(ProcessManager).GetField("blackDelay", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo pmBlackFadeTime =
+        typeof(ProcessManager).GetField("blackFadeTime", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly MethodInfo pmUpdateFade =
+        typeof(ProcessManager).GetMethod("UpdateFade", BindingFlags.Instance | BindingFlags.NonPublic);
 
     private readonly SaveRedirector saves;
     private readonly SharedMemoryBridge sharedMemory;
     private readonly ManualLogSource log;
 
     private bool hooksInstalled = false;
+    private bool fadeFieldsMissingLogged = false;
     private bool desired = false;
     private FlowState state = FlowState.Off;
 
@@ -142,8 +166,58 @@ public class GameFlowController
         lastAutoStartProcess = null;
         autoStartAttempts = 0;
 
+        if (state == FlowState.On && self.currentMainLoop is RainWorldGame)
+            SkipGameFadeIn(self);
+
         if (VerboseLogging)
             log?.LogInfo($"[GameFlow] Process switched to {ID} (now {self.currentMainLoop?.ID})");
+    }
+
+    /// <summary>
+    /// Collapses the fade-from-black every RainWorldGame starts with.
+    ///
+    /// ProcessManager.PostSwitchMainProcess copies RainWorldGame.FadeInTime (New: 2 s; Load:
+    /// SaveState.SlowFadeIn, >= 0.8 s; RainWorldGame.cs 653-674) and InitialBlackSeconds (New: 3 s, 5.5 s as
+    /// Red; Load: 0.75 s; RainWorldGame.cs 677-698) into its private blackFadeTime / blackDelay
+    /// (ProcessManager.cs 1158-1159). ProcessManager.Update then holds fadeToBlack at 1 for blackDelay
+    /// seconds of Time.deltaTime and lerps it down over blackFadeTime (ProcessManager.cs 766-782); because
+    /// the step controller freezes time between steps this only advances during steps, so the agent saw
+    /// ~50 black steps. Called right after that copy, this zeroes the delay, leaves a near-zero remainder so
+    /// the next unpaused Update drives fadeToBlack below 0 and removes the fade sprite plus the "Loading..."
+    /// label through the game's own code path, and re-applies the sprite alpha immediately so even the frame
+    /// rendered before that Update already shows the room.
+    /// </summary>
+    private void SkipGameFadeIn(ProcessManager pm)
+    {
+        if (pmBlackDelay == null || pmBlackFadeTime == null)
+        {
+            if (!fadeFieldsMissingLogged)
+            {
+                log?.LogWarning("[GameFlow] ProcessManager.blackDelay/blackFadeTime not found; cannot skip the game fade-in");
+                fadeFieldsMissingLogged = true;
+            }
+            return;
+        }
+
+        try
+        {
+            pmBlackDelay.SetValue(pm, 0f);
+            pmBlackFadeTime.SetValue(pm, GAME_FADE_IN_SECONDS);
+            if (pm.fadeToBlack > GAME_FADE_IN_REMAINDER)
+                pm.fadeToBlack = GAME_FADE_IN_REMAINDER;
+
+            if (pmUpdateFade != null)
+                pmUpdateFade.Invoke(pm, null);
+            else if (pm.fadeSprite != null)
+                pm.fadeSprite.alpha = 0f;
+
+            if (VerboseLogging)
+                log?.LogInfo("[GameFlow] Skipped game fade-in");
+        }
+        catch (Exception ex)
+        {
+            log?.LogWarning($"[GameFlow] Could not skip the game fade-in: {ex.Message}");
+        }
     }
 
     private void ProcessManager_RequestMainProcessSwitch(
@@ -155,8 +229,13 @@ public class GameFlowController
             log?.LogInfo($"[GameFlow] Skipping {ID} -> Game (Load)");
             self.menuSetup.startGameCondition = ProcessManager.MenuSetup.StoryGameInitCondition.Load;
             ID = ProcessManager.ProcessID.Game;
-            fadeOutSeconds = SKIP_SCREEN_FADE_SECONDS;
         }
+
+        // Nobody watches the screen in RL mode: make every switch (auto-start, RESET, respawn, the game's
+        // own Game requests such as RestartGame) fade out as fast as possible. The default is 0.45 s
+        // (ProcessManager.cs 860-863); ActualProcessSwitch stores it in blackFadeTime (ProcessManager.cs 885).
+        if (state == FlowState.On && fadeOutSeconds > SKIP_SCREEN_FADE_SECONDS)
+            fadeOutSeconds = SKIP_SCREEN_FADE_SECONDS;
 
         orig(self, ID, fadeOutSeconds);
     }
