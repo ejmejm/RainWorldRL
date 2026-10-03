@@ -16,12 +16,14 @@ python -m rainworld_rl.test_env --launch   # random agent demo (run from the rep
 
 ## TODO
 - [x] Immediately load into a preconfigured save state when the python env is connected/resets
-- [ ] Make keyboard action space where multiple keys can be pressed at once
-- [ ] Remake the discrete action space, but as a wrapper over the keyboard action space
+- [x] Make keyboard action space where multiple keys can be pressed at once (`MultiBinary(9)`, see docs/PROTOCOL.md)
+- [x] Remake the discrete action space, but as a wrapper over the keyboard action space (`rainworld_rl.wrappers.DiscreteActions`, optional)
 - [x] Stop exit buttons from working, or immediately load save when main menu is loaded
-- [ ] Add a configurable reward function for things like dying, eating, sleeping, finding new areas, etc.
+- [x] Add a configurable reward function for things like dying, eating, sleeping, finding new areas, etc. (`rainworld_rl.rewards`, see docs/REWARDS.md)
 - [x] Automatically launch the game from the python script
-- [ ] Skip the fade-in after reset so the first observations are not black frames
-- [ ] Scripted death (kill command or hazard room) so the death-edge e2e test can run
+- [x] Skip the fade-in after reset so the first observations are not black frames
+- [x] Scripted death (`env.debug_kill()`) so the death-edge e2e test can run
+- [ ] Live test for the cycle-survived reward edge (needs a shortened rain cycle or a scripted sleep)
+- [ ] Harden connect() against the game's synchronous initial load (occasional heartbeat false-negative right after launch)
 - [ ] Look into headless mode
 - [ ] Look into running multiple environments in parallel
