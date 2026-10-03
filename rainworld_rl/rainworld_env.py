@@ -18,6 +18,10 @@ This is a continual environment: a death is **not** a reset. ``terminated``
 and ``truncated`` are always False; ``info["player_dead"]`` is a one-step
 edge taken straight from the mod's status bit.
 
+``env.debug_kill()`` is a **debug/testing** hook that kills the slugcat on
+demand so the death -> respawn flow can be exercised deterministically. It is
+not part of the RL interface and is not something an agent should call.
+
 Observation = RGB frame only. All other state is in ``info``:
 ``player_dead``, ``karma``, ``karma_cap``, ``food``, ``player_pos`` (x, y),
 ``room_index``, ``cycle_number``, ``step_counter``, ``in_game``, ``ready``,
@@ -262,6 +266,32 @@ class RainWorldEnv(gym.Env):
         if self.render_mode == "rgb_array":
             return self._last_frame
         return None
+
+    # -- debugging / testing -----------------------------------------------
+
+    def debug_kill(self, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: kill the slugcat right now (``KILL_PLAYER``).
+
+        Intended for tests and tooling that need a deterministic death, e.g.
+        to exercise the ``player_dead`` edge and the respawn flow. Not part of
+        the RL interface; an agent has no business calling it.
+
+        Returns as soon as the mod reports the slugcat dead - the respawn is
+        observed through subsequent ``step()`` calls: the next step has
+        ``info["player_dead"] == True`` (one step only), then ``ready`` /
+        ``in_game`` may drop while the mod skips the death screen and reloads
+        the cycle, and the slugcat reappears in the start-of-cycle shelter.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the kill (not in a game, no live
+                player, already dead) or did not ack within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.info("Sending KILL_PLAYER (debug)...")
+        self._client.kill_player(timeout = timeout)
 
     # -- knobs -------------------------------------------------------------
 

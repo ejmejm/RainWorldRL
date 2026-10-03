@@ -51,6 +51,7 @@ env.close()                  # detach; the game keeps running
 | `env.reset(options={"wipe": True})` | Connects if needed, sends `RESET` (wipe RL save, fresh story game, wait for READY), then does one no-op step and returns `(frame, info)`. `options={"wipe": False}` skips the command and just returns the current frame of the game in progress (requires READY). |
 | `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. |
 | `env.disconnect()` / `env.close()` | Clear `CONNECTED`; the mod hands the game back to normal play. Does not quit the game. |
+| `env.debug_kill(timeout=10)` | **Debug/testing only.** Sends `KILL_PLAYER`: the mod kills the slugcat immediately and acks; the respawn is observed through later `step()` calls (see below). Not part of the RL interface. |
 
 Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (10 s),
 `reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`.
@@ -64,6 +65,30 @@ fresh game; it wipes the mod's RL save slot.
 
 `info["player_dead"]` is a one-step edge straight from the mod's status bit:
 `True` exactly for the step during which the player died, `False` otherwise.
+
+What a death looks like from Python (natural or via `debug_kill()`): the step
+in which the slugcat dies has `player_dead == True`; the game then shows its
+"game over" prompt for ~40 ticks, after which the mod presses the restart key
+for the agent, skips the death screen and reloads the cycle. During the reload
+`ready` is `False` (and the game-state fields are zero / -1) for a number of
+steps - steps keep being serviced with the current frame, they never time out -
+and then `ready` comes back with the slugcat in the start-of-cycle shelter.
+Karma follows the game's own rules (-1 unless reinforced, floor 0); the cycle
+number does not change on death (only surviving a cycle advances it).
+
+### Debugging aid: `debug_kill()`
+
+```python
+env.debug_kill()                       # mod kills the slugcat, acks immediately
+_, _, _, _, info = env.step(0)         # info["player_dead"] is True on this step
+while not env.step(0)[4]["ready"]:     # a few dozen steps of death-screen skip + reload
+    pass
+```
+
+`debug_kill()` exists so tests and tooling can exercise the death -> respawn
+flow deterministically. It raises `CommandError` if the mod rejects it (not in
+a game, no live player, already dead) and `GameNotRunningError` if the env is
+not connected.
 
 ### Observation and `info`
 
@@ -122,7 +147,7 @@ All protocol errors derive from `SharedMemoryError`:
   `launch()`.
 - `ReadyTimeoutError` - `READY` never rose within `ready_timeout`.
 - `StepTimeoutError` - mod alive but no frame within `frame_timeout`.
-- `CommandError` - `RESET` was rejected or not acknowledged.
+- `CommandError` - `RESET` / `KILL_PLAYER` was rejected or not acknowledged.
 - `NotConnectedError` - a client operation was used before `connect()`.
 
 `LaunchError` (from `launcher`) covers build/start failures.
@@ -182,7 +207,7 @@ mapping_factory=None)` wraps the mapping directly:
 - `connect(wait_ready=True, ready_timeout=60, liveness_timeout=2)` / `disconnect()`
 - `wait_for_alive(timeout)`, `wait_for_ready(timeout)`
 - `send_action(...)`, `send_action_discrete(action, ticks)`, `wait_for_frame(timeout) -> (frame, ModState)`, `step(action, ticks, timeout)`
-- `send_command(command, timeout)`, `reset_game(timeout)`
+- `send_command(command, timeout)`, `reset_game(timeout)`, `kill_player(timeout)` (debug)
 - `read_state() -> ModState` (whole 64-byte header via one `struct.Struct` read), `set_connected(bool)` (read-modify-write of Python's bit only)
 
 `mapping_factory` lets tests inject a `bytearray`-backed fake; see
