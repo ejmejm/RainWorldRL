@@ -238,6 +238,15 @@ public class SharedMemoryBridge : IDisposable
 
     public byte ReadGameFlags() => accessor.ReadByte(OFFSET_GAME_FLAGS);
 
+    /// <summary>Sets or clears one game_flags bit (read-modify-write). Use this when
+    /// several components own different bits of the byte.</summary>
+    public void SetGameFlag(byte flag, bool value)
+    {
+        byte current = ReadGameFlags();
+        byte next = value ? (byte)(current | flag) : (byte)(current & ~flag);
+        if (next != current) WriteGameFlags(next);
+    }
+
     /// <summary>Writes the slugcat's maximum food pips (offset 27).</summary>
     public void WriteFoodMax(int foodMax) => accessor.Write(OFFSET_FOOD_MAX, ClampByte(foodMax));
 
