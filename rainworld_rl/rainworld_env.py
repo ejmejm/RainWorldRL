@@ -23,9 +23,18 @@ demand so the death -> respawn flow can be exercised deterministically. It is
 not part of the RL interface and is not something an agent should call.
 
 Observation = RGB frame only. All other state is in ``info``:
-``player_dead``, ``karma``, ``karma_cap``, ``food``, ``player_pos`` (x, y),
-``room_index``, ``cycle_number``, ``step_counter``, ``in_game``, ``ready``,
-``human_override``.
+``player_dead``, ``karma``, ``karma_cap``, ``food``, ``food_max``,
+``player_pos`` (x, y), ``room_index``, ``cycle_number``, ``step_counter``,
+``in_game``, ``ready``, ``human_override``, ``in_shelter``, ``cycle_survived``,
+``rain``, ``dialog_open``, ``cycle_progress``.
+
+Actions
+-------
+``action_space = MultiBinary(NUM_KEYS)``: one bit per key the player can hold
+(``shared_memory.KEY_NAMES`` gives the bit order: left, right, up, down, jump,
+grab, throw, map, special). Any combination may be held in one step.
+``step()`` also accepts a plain ``int`` bitmask of ``KEY_*`` values.
+The classic Discrete(18) set is available as ``rainworld_rl.wrappers.DiscreteActions``.
 
 While the human override (F10 in game) is active, ``step()`` blocks until it is
 released instead of timing out, and logs once via ``logging``.
@@ -53,10 +62,12 @@ from gymnasium import spaces
 
 from .config import Config
 from .shared_memory import (
-    NUM_DISCRETE_ACTIONS,
+    KEY_NAMES,
+    NUM_KEYS,
     GameNotRunningError,
     ModState,
     SharedMemoryClient,
+    action_to_bits,
 )
 
 
@@ -71,8 +82,13 @@ class RainWorldEnv(gym.Env):
         Box(0, 255, (height, width, 3), uint8) - RGB frame from the game.
 
     Action Space:
-        Discrete(18) - see ``shared_memory.DISCRETE_ACTION_NAMES``.
+        MultiBinary(NUM_KEYS) - one entry per key in ``shared_memory.KEY_NAMES``
+        (left, right, up, down, jump, grab, throw, map, special); any
+        combination at once. ``step()`` also takes an ``int`` bitmask of
+        ``shared_memory.KEY_*``. Wrap with ``wrappers.DiscreteActions`` for Discrete(18).
     """
+
+    key_names = KEY_NAMES
 
     metadata = {"render_modes": ["rgb_array"]}
 
@@ -123,7 +139,7 @@ class RainWorldEnv(gym.Env):
         self.observation_space = spaces.Box(
             low = 0, high = 255, shape = (frame_height, frame_width, 3), dtype = np.uint8
         )
-        self.action_space = spaces.Discrete(NUM_DISCRETE_ACTIONS)
+        self.action_space = spaces.MultiBinary(NUM_KEYS)
 
         self._client: SharedMemoryClient = client or SharedMemoryClient(
             frame_width, frame_height, debug_timing = debug_timing
@@ -241,9 +257,13 @@ class RainWorldEnv(gym.Env):
         self._last_state = state
         return frame, state.to_info()
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+    def step(self, action) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
-        Advance the game by ``ticks_per_step`` ticks with the given action.
+        Advance the game by ``ticks_per_step`` ticks holding the given keys.
+
+        Args:
+            action: A ``MultiBinary(NUM_KEYS)`` vector (0/1 per key, ``KEY_NAMES``
+                order) or an ``int`` bitmask of ``shared_memory.KEY_*`` values.
 
         Returns:
             observation: RGB frame.
@@ -257,7 +277,8 @@ class RainWorldEnv(gym.Env):
         if not self.connected:
             raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
 
-        frame, state = self._client.step(int(action), self.ticks_per_step, timeout = self.frame_timeout)
+        bits = action_to_bits(action)
+        frame, state = self._client.step(bits, self.ticks_per_step, timeout = self.frame_timeout)
         self._last_frame = frame
         self._last_state = state
         return frame, 0.0, False, False, state.to_info()

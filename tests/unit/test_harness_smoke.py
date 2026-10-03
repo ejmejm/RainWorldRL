@@ -18,18 +18,26 @@ import pytest
 
 from tests import conftest as harness_conftest
 from tests.harness import (
-    ACTION_LEFT,
-    ACTION_NOOP,
-    ACTION_RIGHT,
     INFO_CONTRACT,
-    NUM_ACTIONS,
+    JUMP,
+    KEY_ALL_MASK,
+    KEY_LEFT,
+    KEY_NAMES,
+    KEY_RIGHT,
+    LEFT,
+    NOOP,
+    NUM_KEYS,
+    RIGHT,
     STATUS_CONNECTED,
     STATUS_IN_GAME,
     STATUS_MOD_ALIVE,
     STATUS_READY,
+    action_bits,
     assert_info_contract,
+    bits_to_vector,
     get_client,
     infos,
+    keys,
     read_state,
     state_field,
     status_bit,
@@ -79,7 +87,7 @@ class FakeEnv:
         self.frame_height = frame_height
         self.ticks_per_step = ticks_per_step
         self.observation_space = SimpleNamespace(shape=(frame_height, frame_width, 3), dtype=np.uint8)
-        self.action_space = SimpleNamespace(n=NUM_ACTIONS)
+        self.action_space = SimpleNamespace(shape=(NUM_KEYS,), n=NUM_KEYS)
         self.connected = False
         self.launched = False
         self.closed = False
@@ -114,14 +122,14 @@ class FakeEnv:
             self._room_index = self.START_ROOM
         return self._frame(), self._info()
 
-    def step(self, action: int):
+    def step(self, action):
         if not self.connected:
             raise RuntimeError("not connected")
-        if not 0 <= int(action) < NUM_ACTIONS:
-            raise ValueError(f"action {action} outside Discrete({NUM_ACTIONS})")
-        if action in (2, 9, 13, 17):
+        bits = action_bits(action)  # int bitmask or MultiBinary vector (raises like the real env)
+        right, left = bool(bits & KEY_RIGHT), bool(bits & KEY_LEFT)
+        if right and not left:
             self._x += self.SPEED * self.ticks_per_step
-        elif action in (1, 8, 12, 16):
+        elif left and not right:
             self._x -= self.SPEED * self.ticks_per_step
         self._step_counter += 1
         return self._frame(), 0.0, False, False, self._info()
@@ -218,11 +226,13 @@ def test_fake_env_satisfies_contract(fake: FakeEnv):
     assert_info_contract(info)
     assert set(info) == set(INFO_CONTRACT)
 
-    obs, reward, terminated, truncated, info = fake.step(ACTION_NOOP)
+    obs, reward, terminated, truncated, info = fake.step(NOOP)
     assert reward == 0.0 and terminated is False and truncated is False
     assert_info_contract(info)
     with pytest.raises(ValueError):
-        fake.step(NUM_ACTIONS)
+        fake.step(KEY_ALL_MASK + 1)
+    with pytest.raises(ValueError):
+        fake.step([1, 0])  # wrong-length key vector
 
 
 def test_step_n_defaults_to_noop(fake: FakeEnv):
@@ -239,7 +249,7 @@ def test_step_n_with_action_fn(fake: FakeEnv):
 
     def policy(i: int) -> int:
         seen.append(i)
-        return ACTION_RIGHT if i < 4 else ACTION_LEFT
+        return RIGHT if i < 4 else LEFT
 
     results = step_n(fake, 6, policy)
     assert seen == list(range(6))
@@ -248,8 +258,35 @@ def test_step_n_with_action_fn(fake: FakeEnv):
     assert xs[-1] - xs[3] == pytest.approx(-2 * FakeEnv.SPEED)
 
 
+def test_step_n_accepts_key_vectors_and_combos(fake: FakeEnv):
+    """MultiBinary vectors and combined bitmasks are passed through untouched."""
+    x0 = fake._info()["player_pos"][0]
+    results = step_n(fake, 2, lambda i: bits_to_vector(RIGHT))              # list vector
+    results += step_n(fake, 2, lambda i: np.array(bits_to_vector(RIGHT)))   # ndarray vector
+    results += step_n(fake, 1, lambda i: RIGHT | JUMP)                      # combo bitmask
+    results += step_n(fake, 1, lambda i: RIGHT | LEFT)                      # opposite keys cancel
+    xs = [pos[0] for pos in infos(results, "player_pos")]
+    assert xs[-1] - x0 == pytest.approx(5 * FakeEnv.SPEED)
+    assert infos(results, "step_counter") == [1, 2, 3, 4, 5, 6]
+
+
 def test_step_n_zero_steps(fake: FakeEnv):
     assert step_n(fake, 0) == []
+
+
+def test_key_constants_match_protocol():
+    """tests/harness.py mirrors PROTOCOL.md; cross-check against the real client when importable."""
+    assert KEY_NAMES == ("left", "right", "up", "down", "jump", "grab", "throw", "map", "special")
+    assert NUM_KEYS == 9 and KEY_ALL_MASK == 0x1FF
+    assert keys("right", "jump") == RIGHT | JUMP
+    assert bits_to_vector(RIGHT | JUMP) == [0, 1, 0, 0, 1, 0, 0, 0, 0]
+    assert action_bits(bits_to_vector(0x155)) == 0x155
+    with pytest.raises(KeyError):
+        keys("pause")
+    sm = pytest.importorskip("rainworld_rl.shared_memory")
+    assert tuple(sm.KEY_NAMES) == KEY_NAMES
+    for i, name in enumerate(KEY_NAMES):
+        assert getattr(sm, f"KEY_{name.upper()}") == 1 << i
 
 
 def test_assert_info_contract_reports_missing_keys():

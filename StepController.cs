@@ -9,7 +9,7 @@ using UnityEngine;
 /// game can get itself back into a playable state.
 ///
 /// Step lifecycle (sync flag transitions):
-///   Python writes action + ACTION_READY
+///   Python writes action_bits + ACTION_READY
 ///   -> ProcessUpdate consumes action once, writes PROCESSING, unpauses
 ///   -> ProcessFixedUpdate counts ticks, pauses when ticksPerStep reached
 ///   -> ProcessPostRender captures frame, writes game state + status, step_counter++, writes FRAME_READY last
@@ -212,11 +212,16 @@ public class StepController
         }
 
         // Consume the action exactly once
-        byte action = sharedMemory.ReadAction();
+        uint actionBits = sharedMemory.ReadActionBits();
         ticksPerStep = sharedMemory.ReadTicksPerStep();
         sharedMemory.SignalProcessing();
 
-        inputInjector.SetFromActionByte(action);
+        inputInjector.SetFromActionBits(actionBits);
+
+        // A pause menu left open (e.g. by a human before releasing F10) would freeze the world
+        // while steps keep being serviced; close it the way its CONTINUE button does.
+        if (inputInjector.DismissPauseMenu(rainWorld))
+            log?.LogInfo("[StepController] Pause menu was open while the agent is in control; dismissing it");
 
         currentTick = 0;
         stepInProgress = true;
@@ -266,6 +271,9 @@ public class StepController
         // Game state + death edge
         bool deathEdge = WriteGameState();
         sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_PLAYER_DEAD, deathEdge);
+
+        // Is an in-game prompt (dialog, game-over "press X to restart", pause menu) awaiting a key?
+        sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_DIALOG_OPEN, InputInjector.IsPromptAwaitingInput(rainWorld));
 
         sharedMemory.IncrementStepCounter();
 

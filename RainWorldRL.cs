@@ -14,7 +14,9 @@ using UnityEngine;
 ///
 /// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
 /// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
-/// save). F10 toggles HUMAN_OVERRIDE while RL mode is on.
+/// save). F10 toggles HUMAN_OVERRIDE while RL mode is on. Actions are raw key bitfields
+/// (SharedMemoryBridge.KEY_*) injected by InputInjector; the pause button is blocked while the
+/// agent is in control.
 /// </summary>
 [BepInPlugin("rainworld.rl", "RainWorldRL", "0.2")]
 public class RainWorldRL : BaseUnityPlugin
