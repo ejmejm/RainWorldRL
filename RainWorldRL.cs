@@ -165,6 +165,7 @@ public class RainWorldRL : BaseUnityPlugin
             inputInjector.Install();
             saveRedirector.Install();
             gameFlow.Install();
+            stepController.Install();
             hooksInstalled = true;
             Logger.LogInfo("Game hooks installed");
         }
@@ -179,6 +180,7 @@ public class RainWorldRL : BaseUnityPlugin
         if (!hooksInstalled)
             return;
 
+        stepController?.Uninstall();
         gameFlow?.Uninstall();
         saveRedirector?.Uninstall();
         inputInjector?.Uninstall();

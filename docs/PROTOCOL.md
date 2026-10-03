@@ -25,14 +25,16 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 24     | 1    | mod→py  | `karma`            | uint8, current karma level (0 if not in game) |
 | 25     | 1    | mod→py  | `karma_cap`        | uint8 |
 | 26     | 1    | mod→py  | `food`             | uint8, food pips |
-| 27     | 1    | mod→py  | `food_max`         | uint8, the slugcat's maximum food pips |
+| 27     | 1    | mod→py  | `food_max`         | uint8, the slugcat's maximum food pips (`SlugcatStats.maxFood`; Survivor 7) |
 | 28     | 4    | mod→py  | `player_x`         | float32, player body chunk 0 position in room coords (0 if unavailable) |
 | 32     | 4    | mod→py  | `player_y`         | float32 |
 | 36     | 4    | mod→py  | `room_index`       | int32, abstract room index (-1 if unavailable) |
 | 40     | 4    | mod→py  | `cycle_number`     | int32, save-state cycle number (-1 if unavailable) |
 | 44     | 4    | py→mod  | `action_bits`      | uint32, raw-key action bitfield: one bit per held key, any combination. Bit assignments in **Action bits** below. Bits above the defined keys are ignored. |
-| 48     | 4    | mod→py  | `cycle_progress`   | float32, fraction of the rain cycle elapsed (0..1; >1 once rain has started; 0 if unavailable) |
-| 52     | 12   | -       | reserved           | |
+| 48     | 4    | mod→py  | `cycle_progress`   | float32, `RainCycle.timer / cycleLength` (0..1; >1 once the rain is falling, the timer keeps counting; 0 if unavailable). Note: in the first cycle of a fresh save the overseer tutorial pins `timer` to 2000 (`OverseerTutorialBehavior.pauseRain`) until the player leaves the start rooms (x > 600 in `SU_A43`, or `SU_A22`), then fast-forwards it. |
+| 52     | 1    | mod→py  | `food_to_hibernate`| uint8, food pips needed to hibernate this cycle (`SlugcatStats.foodToHibernate`; Survivor 4; equals `food_max` while malnourished; 0 if unavailable) |
+| 53     | 1    | mod→py  | `malnourished`     | uint8 0/1 (level), `SaveState.malnourished`: the previous sleep was a starving one, so this cycle needs `food_max` pips to sleep |
+| 54     | 10   | -       | reserved           | |
 | 64     | N    | mod→py  | `frame`            | RGB24, row-major, top row first, width*height*3 bytes |
 
 ## Action bits (offset 44)
@@ -71,6 +73,19 @@ but only while a `RainWorldGame` is current or a `Menu.Dialog` is running - so i
 while the menus the mod navigates itself between games are left alone. Conversation text
 (`HUD.DialogBox`: iterators, Watcher dialogue, tutorial text) advances on a timer and needs no key.
 `game_flags.DIALOG_OPEN` tells the client when such a prompt is waiting.
+
+## Game flags (offset 14)
+
+Mod-owned byte; every writer uses a read-modify-write of its own bit(s)
+(`SharedMemoryBridge.SetGameFlag`). Bits 0-2 are written per step together with the
+other game-state fields and cleared (with them) when no game state is available.
+
+| Bit | Name              | Kind  | Meaning |
+|----:|-------------------|-------|---------|
+| 0   | `IN_SHELTER`      | level | Player 0 is in a shelter room (`AbstractRoom.shelter`). |
+| 1   | `CYCLE_SURVIVED`  | edge  | Set for exactly one step: the player hibernated **with enough food** since the previous step (`RainWorldGame.Win` ran with `malnourished == false`, the SleepScreen path). A starving sleep (`Win(malnourished: true)`, StarveScreen) does **not** set it; it shows up as `cycle_number + 1` with `malnourished = 1`. The bit is delivered even if the game process has already switched for the sleep-screen redirect on that step (other fields may read as unavailable then). |
+| 2   | `RAIN`            | level | The cycle timer has expired and the lethal rain is falling: `RainCycle.TimeUntilRain <= 0` (= `RainCycle.RainGameOver`), the same instant `cycle_progress` crosses 1.0. The visual darkening before that (`RainDarkPalette`) is *not* included. |
+| 3   | `DIALOG_OPEN`     | level | A text/dialog overlay awaits player input. |
 
 ## Status bits (offset 3)
 
