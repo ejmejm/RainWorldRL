@@ -1,4 +1,5 @@
+# Python >= 3.11 (tomllib)
 numpy>=1.21.0
 gymnasium>=0.29.0
 Pillow>=9.0.0  # Optional, for saving frames in test script
-
+pytest>=7.0    # Optional, for python/tests_unit

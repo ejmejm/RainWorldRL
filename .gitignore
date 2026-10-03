@@ -3,3 +3,5 @@
 bin/
 obj/
 **/__pycache__/
+.pytest_cache/
+rainworld_rl.toml

@@ -1,0 +1,18 @@
+# Rain World RL configuration.
+#
+# Copy this file to `rainworld_rl.toml` (same directory; it is git-ignored) and
+# edit the values. Lookup order: explicit path passed to load_config() >
+# $RAINWORLD_RL_CONFIG > ./rainworld_rl.toml > built-in defaults.
+#
+# Use forward slashes (or escaped backslashes) in paths.
+
+# Rain World installation directory (the folder containing RainWorld.exe).
+# Derived from it: RainWorld.exe, BepInEx/plugins, BepInEx/LogOutput.log.
+game_dir = "Z:/SteamLibrary/steamapps/common/Rain World"
+
+# Seconds launch() waits for the mod's heartbeat after starting the game.
+launch_timeout = 120.0
+
+# Where the mod keeps the RL save. Informational only: the mod decides, this
+# just tells Python where to look. Defaults to <game_dir>/BepInEx/plugins/RainWorldRL/saves.
+# rl_save_dir = "Z:/SteamLibrary/steamapps/common/Rain World/BepInEx/plugins/RainWorldRL/saves"

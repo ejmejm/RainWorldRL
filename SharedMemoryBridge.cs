@@ -1,26 +1,42 @@
 using System;
 using System.IO.MemoryMappedFiles;
-using System.Threading;
 
 /// <summary>
-/// Manages shared memory communication between the Rain World mod and Python RL client.
-/// 
-/// Memory Layout:
-/// Offset 0:  1 byte  - Sync flag (0=idle, 1=action_ready, 2=frame_ready, 3=processing)
-///                      Python: idle -> action_ready. Mod: action_ready -> processing -> frame_ready.
-///                      Python: frame_ready -> idle after reading the frame.
-/// Offset 1:  1 byte  - Action bitfield (bits: 0=jump, 1=grab, 2=throw, 3-4=horizontal, 5-6=vertical)
-/// Offset 2:  1 byte  - Ticks per step
-/// Offset 3:  1 byte  - Status flags (bit 0=player_dead, bit 1=connected)
-/// Offset 4:  4 bytes - Frame width (uint32)
-/// Offset 8:  4 bytes - Frame height (uint32)
-/// Offset 12: N bytes - RGB frame data (width * height * 3)
+/// Manages shared memory communication between the Rain World mod and the Python RL client.
+/// Implements protocol v2 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
+///
+/// Header layout (64 bytes):
+///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
+///   1   u8   action           py->mod bitfield
+///   2   u8   ticks_per_step   py->mod (0 treated as 1)
+///   3   u8   status           shared bitfield; each side only writes its own bits
+///   4   u32  frame_width      py->mod
+///   8   u32  frame_height     py->mod
+///   12  u8   command          py->mod (0 NONE, 1 RESET); mod clears when done
+///   13  u8   command_result   mod->py (0 none, 1 OK, 2 ERROR)
+///   14  u16  reserved
+///   16  u32  heartbeat        mod->py, incremented every Unity Update
+///   20  u32  step_counter     mod->py, incremented once per completed step
+///   24  u8   karma
+///   25  u8   karma_cap
+///   26  u8   food
+///   27  u8   reserved
+///   28  f32  player_x
+///   32  f32  player_y
+///   36  i32  room_index       (-1 if unavailable)
+///   40  i32  cycle_number     (-1 if unavailable)
+///   44  20B  reserved
+///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
 {
     public const string SHARED_MEMORY_NAME = "RainWorldRL";
-    public const int HEADER_SIZE = 12;
-    public const int MAX_FRAME_SIZE = 1920 * 1080 * 3; // Support up to 1080p
+    public const int HEADER_SIZE = 64;
+    public const int MAX_FRAME_WIDTH = 1920;
+    public const int MAX_FRAME_HEIGHT = 1080;
+    public const int MAX_FRAME_SIZE = MAX_FRAME_WIDTH * MAX_FRAME_HEIGHT * 3;
+    public const int DEFAULT_FRAME_WIDTH = 160;
+    public const int DEFAULT_FRAME_HEIGHT = 90;
 
     // Sync flag values
     public const byte SYNC_IDLE = 0;
@@ -28,14 +44,32 @@ public class SharedMemoryBridge : IDisposable
     public const byte SYNC_FRAME_READY = 2;
     public const byte SYNC_PROCESSING = 3;
 
-    // Memory offsets
+    // Commands (offset 12) and results (offset 13)
+    public const byte CMD_NONE = 0;
+    public const byte CMD_RESET = 1;
+    public const byte RESULT_NONE = 0;
+    public const byte RESULT_OK = 1;
+    public const byte RESULT_ERROR = 2;
+
+    // Header offsets
     private const int OFFSET_SYNC_FLAG = 0;
     private const int OFFSET_ACTION = 1;
     private const int OFFSET_TICKS_PER_STEP = 2;
     private const int OFFSET_STATUS = 3;
     private const int OFFSET_WIDTH = 4;
     private const int OFFSET_HEIGHT = 8;
-    private const int OFFSET_FRAME_DATA = 12;
+    private const int OFFSET_COMMAND = 12;
+    private const int OFFSET_COMMAND_RESULT = 13;
+    private const int OFFSET_HEARTBEAT = 16;
+    private const int OFFSET_STEP_COUNTER = 20;
+    private const int OFFSET_KARMA = 24;
+    private const int OFFSET_KARMA_CAP = 25;
+    private const int OFFSET_FOOD = 26;
+    private const int OFFSET_PLAYER_X = 28;
+    private const int OFFSET_PLAYER_Y = 32;
+    private const int OFFSET_ROOM_INDEX = 36;
+    private const int OFFSET_CYCLE_NUMBER = 40;
+    private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
     // Action bitfield masks
     public const byte ACTION_JUMP = 0x01;
@@ -44,16 +78,26 @@ public class SharedMemoryBridge : IDisposable
     public const byte ACTION_HORIZONTAL_MASK = 0x18; // bits 3-4
     public const byte ACTION_VERTICAL_MASK = 0x60;   // bits 5-6
 
-    // Status flags
-    public const byte STATUS_PLAYER_DEAD = 0x01;
-    public const byte STATUS_CONNECTED = 0x02;
+    // Status bits (offset 3)
+    public const byte STATUS_PLAYER_DEAD = 0x01;    // mod, edge-triggered
+    public const byte STATUS_CONNECTED = 0x02;      // python
+    public const byte STATUS_READY = 0x04;          // mod
+    public const byte STATUS_HUMAN_OVERRIDE = 0x08; // mod
+    public const byte STATUS_IN_GAME = 0x10;        // mod
+    public const byte STATUS_MOD_ALIVE = 0x20;      // mod
+
+    /// <summary>Bits the mod is allowed to write. Everything else belongs to Python.</summary>
+    public const byte MOD_OWNED_STATUS_MASK =
+        STATUS_PLAYER_DEAD | STATUS_READY | STATUS_HUMAN_OVERRIDE | STATUS_IN_GAME | STATUS_MOD_ALIVE;
 
     private MemoryMappedFile mmf;
     private MemoryMappedViewAccessor accessor;
     private bool disposed = false;
 
-    public int FrameWidth { get; private set; }
-    public int FrameHeight { get; private set; }
+    public int FrameWidth { get; private set; } = DEFAULT_FRAME_WIDTH;
+    public int FrameHeight { get; private set; } = DEFAULT_FRAME_HEIGHT;
+
+    /// <summary>True while Python holds the CONNECTED bit.</summary>
     public bool IsConnected => (ReadStatus() & STATUS_CONNECTED) != 0;
 
     public SharedMemoryBridge()
@@ -62,143 +106,141 @@ public class SharedMemoryBridge : IDisposable
         mmf = MemoryMappedFile.CreateOrOpen(SHARED_MEMORY_NAME, totalSize);
         accessor = mmf.CreateViewAccessor();
 
-        // Initialize to idle state
+        // Reset the handshake and our own status bits. Python's CONNECTED bit and
+        // the py->mod fields (action, dims, command) are left untouched in case the
+        // client attached first.
         WriteSyncFlag(SYNC_IDLE);
+        UpdateStatusBits(MOD_OWNED_STATUS_MASK, 0);
+        WriteCommandResult(RESULT_NONE);
+        ClearGameState();
     }
 
-    /// <summary>
-    /// Reads the current sync flag value.
-    /// </summary>
-    public byte ReadSyncFlag()
-    {
-        return accessor.ReadByte(OFFSET_SYNC_FLAG);
-    }
+    // ----- sync flag -----
 
-    /// <summary>
-    /// Writes a sync flag value.
-    /// </summary>
-    public void WriteSyncFlag(byte value)
-    {
-        accessor.Write(OFFSET_SYNC_FLAG, value);
-    }
+    public byte ReadSyncFlag() => accessor.ReadByte(OFFSET_SYNC_FLAG);
 
-    /// <summary>
-    /// Reads the action byte from shared memory.
-    /// </summary>
-    public byte ReadAction()
-    {
-        return accessor.ReadByte(OFFSET_ACTION);
-    }
+    public void WriteSyncFlag(byte value) => accessor.Write(OFFSET_SYNC_FLAG, value);
 
-    /// <summary>
-    /// Reads the ticks per step value.
-    /// </summary>
+    public bool IsActionReady() => ReadSyncFlag() == SYNC_ACTION_READY;
+
+    /// <summary>Marks the pending action as consumed so it is not read twice.</summary>
+    public void SignalProcessing() => WriteSyncFlag(SYNC_PROCESSING);
+
+    /// <summary>Signals that the frame and all header fields are ready. Must be written last.</summary>
+    public void SignalFrameReady() => WriteSyncFlag(SYNC_FRAME_READY);
+
+    // ----- py -> mod inputs -----
+
+    public byte ReadAction() => accessor.ReadByte(OFFSET_ACTION);
+
     public byte ReadTicksPerStep()
     {
         byte ticks = accessor.ReadByte(OFFSET_TICKS_PER_STEP);
-        return ticks == 0 ? (byte)1 : ticks; // Default to 1 if not set
+        return ticks == 0 ? (byte)1 : ticks;
     }
 
-    /// <summary>
-    /// Reads the status flags.
-    /// </summary>
-    public byte ReadStatus()
-    {
-        return accessor.ReadByte(OFFSET_STATUS);
-    }
+    public byte ReadCommand() => accessor.ReadByte(OFFSET_COMMAND);
+
+    public void WriteCommand(byte command) => accessor.Write(OFFSET_COMMAND, command);
+
+    public void WriteCommandResult(byte result) => accessor.Write(OFFSET_COMMAND_RESULT, result);
 
     /// <summary>
-    /// Writes status flags.
-    /// </summary>
-    public void WriteStatus(byte status)
-    {
-        accessor.Write(OFFSET_STATUS, status);
-    }
-
-    /// <summary>
-    /// Sets a specific status flag bit.
-    /// </summary>
-    public void SetStatusFlag(byte flag, bool value)
-    {
-        byte current = ReadStatus();
-        if (value)
-            current |= flag;
-        else
-            current &= (byte)~flag;
-        WriteStatus(current);
-    }
-
-    /// <summary>
-    /// Reads frame dimensions from shared memory. Call this to update FrameWidth/FrameHeight.
+    /// Reads the requested frame dimensions, clamping to the supported range and
+    /// falling back to the defaults for zero/garbage values.
     /// </summary>
     public void ReadFrameDimensions()
     {
-        FrameWidth = accessor.ReadInt32(OFFSET_WIDTH);
-        FrameHeight = accessor.ReadInt32(OFFSET_HEIGHT);
+        int w = accessor.ReadInt32(OFFSET_WIDTH);
+        int h = accessor.ReadInt32(OFFSET_HEIGHT);
 
-        // Clamp to valid range
-        if (FrameWidth <= 0 || FrameWidth > 1920)
-            FrameWidth = 160;
-        if (FrameHeight <= 0 || FrameHeight > 1080)
-            FrameHeight = 90;
+        FrameWidth = (w <= 0 || w > MAX_FRAME_WIDTH) ? DEFAULT_FRAME_WIDTH : w;
+        FrameHeight = (h <= 0 || h > MAX_FRAME_HEIGHT) ? DEFAULT_FRAME_HEIGHT : h;
     }
 
+    // ----- status -----
+
+    public byte ReadStatus() => accessor.ReadByte(OFFSET_STATUS);
+
     /// <summary>
-    /// Writes frame data to shared memory.
+    /// Read-modify-write of mod-owned status bits only. Bits in <paramref name="mask"/>
+    /// are replaced by the corresponding bits of <paramref name="value"/>; all other bits
+    /// (including Python's CONNECTED bit) are preserved. Bits outside the mod-owned set
+    /// are ignored even if present in the mask.
     /// </summary>
+    public void UpdateStatusBits(byte mask, byte value)
+    {
+        mask &= MOD_OWNED_STATUS_MASK;
+        if (mask == 0)
+            return;
+
+        byte current = ReadStatus();
+        byte updated = (byte)((current & ~mask) | (value & mask));
+        if (updated != current)
+            accessor.Write(OFFSET_STATUS, updated);
+    }
+
+    /// <summary>Sets or clears a single mod-owned status flag.</summary>
+    public void SetStatusFlag(byte flag, bool value)
+    {
+        UpdateStatusBits(flag, value ? flag : (byte)0);
+    }
+
+    // ----- counters -----
+
+    public uint ReadHeartbeat() => accessor.ReadUInt32(OFFSET_HEARTBEAT);
+
+    public void IncrementHeartbeat()
+    {
+        accessor.Write(OFFSET_HEARTBEAT, unchecked(accessor.ReadUInt32(OFFSET_HEARTBEAT) + 1u));
+    }
+
+    public uint ReadStepCounter() => accessor.ReadUInt32(OFFSET_STEP_COUNTER);
+
+    public void IncrementStepCounter()
+    {
+        accessor.Write(OFFSET_STEP_COUNTER, unchecked(accessor.ReadUInt32(OFFSET_STEP_COUNTER) + 1u));
+    }
+
+    // ----- game state -----
+
+    /// <summary>Writes the per-step game-state fields (offsets 24..43).</summary>
+    public void WriteGameState(int karma, int karmaCap, int food, float playerX, float playerY, int roomIndex, int cycleNumber)
+    {
+        accessor.Write(OFFSET_KARMA, ClampByte(karma));
+        accessor.Write(OFFSET_KARMA_CAP, ClampByte(karmaCap));
+        accessor.Write(OFFSET_FOOD, ClampByte(food));
+        accessor.Write(OFFSET_PLAYER_X, playerX);
+        accessor.Write(OFFSET_PLAYER_Y, playerY);
+        accessor.Write(OFFSET_ROOM_INDEX, roomIndex);
+        accessor.Write(OFFSET_CYCLE_NUMBER, cycleNumber);
+    }
+
+    /// <summary>Writes the "unavailable" values for all game-state fields.</summary>
+    public void ClearGameState()
+    {
+        WriteGameState(0, 0, 0, 0f, 0f, -1, -1);
+    }
+
+    private static byte ClampByte(int v)
+    {
+        if (v < 0) return 0;
+        if (v > 255) return 255;
+        return (byte)v;
+    }
+
+    // ----- frame -----
+
+    /// <summary>Writes RGB24 frame data; size is bounded by the current frame dimensions.</summary>
     public void WriteFrameData(byte[] frameData)
     {
         if (frameData == null || frameData.Length == 0)
             return;
 
         int expectedSize = FrameWidth * FrameHeight * 3;
-        int writeSize = Math.Min(frameData.Length, expectedSize);
+        int writeSize = Math.Min(frameData.Length, Math.Min(expectedSize, MAX_FRAME_SIZE));
 
         accessor.WriteArray(OFFSET_FRAME_DATA, frameData, 0, writeSize);
-    }
-
-    /// <summary>
-    /// Waits for the sync flag to become a specific value.
-    /// </summary>
-    public bool WaitForSyncFlag(byte expectedValue, int timeoutMs = -1)
-    {
-        int elapsed = 0;
-        while (ReadSyncFlag() != expectedValue)
-        {
-            Thread.Sleep(0); // Yield to other threads
-            if (timeoutMs > 0)
-            {
-                elapsed++;
-                if (elapsed > timeoutMs)
-                    return false;
-            }
-        }
-        return true;
-    }
-
-    /// <summary>
-    /// Checks if an action is ready to be processed.
-    /// </summary>
-    public bool IsActionReady()
-    {
-        return ReadSyncFlag() == SYNC_ACTION_READY;
-    }
-
-    /// <summary>
-    /// Signals that the pending action has been consumed and a step is running.
-    /// Prevents the same action from being read again on subsequent Updates.
-    /// </summary>
-    public void SignalProcessing()
-    {
-        WriteSyncFlag(SYNC_PROCESSING);
-    }
-
-    /// <summary>
-    /// Signals that the frame is ready to be read by Python.
-    /// </summary>
-    public void SignalFrameReady()
-    {
-        WriteSyncFlag(SYNC_FRAME_READY);
     }
 
     public void Dispose()
@@ -211,4 +253,3 @@ public class SharedMemoryBridge : IDisposable
         }
     }
 }
-

@@ -6,37 +6,49 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <!--
+    Rain World installation directory. Override on the command line:
+      dotnet build -p:RainWorldDir="D:/Games/Rain World"
+    build.ps1 and python/launcher.py read it from rainworld_rl.toml and pass it here.
+  -->
+  <PropertyGroup>
+    <RainWorldDir Condition="'$(RainWorldDir)' == ''">Z:/SteamLibrary/steamapps/common/Rain World</RainWorldDir>
+    <RainWorldManaged>$(RainWorldDir)/RainWorld_Data/Managed</RainWorldManaged>
+    <BepInExCore>$(RainWorldDir)/BepInEx/core</BepInExCore>
+    <BepInExPlugins>$(RainWorldDir)/BepInEx/plugins</BepInExPlugins>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- BepInEx -->
     <Reference Include="BepInEx">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/BepInEx/core/BepInEx.dll</HintPath>
+      <HintPath>$(BepInExCore)/BepInEx.dll</HintPath>
     </Reference>
 
     <!-- Unity -->
     <Reference Include="UnityEngine">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/RainWorld_Data/Managed/UnityEngine.dll</HintPath>
+      <HintPath>$(RainWorldManaged)/UnityEngine.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.CoreModule">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/RainWorld_Data/Managed/UnityEngine.CoreModule.dll</HintPath>
+      <HintPath>$(RainWorldManaged)/UnityEngine.CoreModule.dll</HintPath>
     </Reference>
     <Reference Include="UnityEngine.InputLegacyModule">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/RainWorld_Data/Managed/UnityEngine.InputLegacyModule.dll</HintPath>
+      <HintPath>$(RainWorldManaged)/UnityEngine.InputLegacyModule.dll</HintPath>
     </Reference>
 
     <!-- Rain World game code -->
     <Reference Include="Assembly-CSharp">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/RainWorld_Data/Managed/Assembly-CSharp.dll</HintPath>
+      <HintPath>$(RainWorldManaged)/Assembly-CSharp.dll</HintPath>
     </Reference>
 
     <!-- MonoMod hooks (On.* classes) -->
     <Reference Include="HOOKS-Assembly-CSharp">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/BepInEx/plugins/HOOKS-Assembly-CSharp.dll</HintPath>
+      <HintPath>$(BepInExPlugins)/HOOKS-Assembly-CSharp.dll</HintPath>
     </Reference>
     <Reference Include="MonoMod.RuntimeDetour">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/BepInEx/core/MonoMod.RuntimeDetour.dll</HintPath>
+      <HintPath>$(BepInExCore)/MonoMod.RuntimeDetour.dll</HintPath>
     </Reference>
     <Reference Include="MonoMod.Utils">
-      <HintPath>z:/SteamLibrary/steamapps/common/Rain World/BepInEx/core/MonoMod.Utils.dll</HintPath>
+      <HintPath>$(BepInExCore)/MonoMod.Utils.dll</HintPath>
     </Reference>
   </ItemGroup>
 

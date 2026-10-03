@@ -1,139 +1,149 @@
 """
-Test script for the Rain World RL environment.
+Smoke test for the Rain World RL environment with a random agent.
 
-This script connects to a running Rain World game with the RainWorldRL mod
-and runs a simple random agent to verify the environment is working.
+By default this attaches to a game that is already running with the
+RainWorldRL mod (``env.connect()``). Pass ``--launch`` to build the mod,
+(re)start the game and connect (``env.launch()``; Steam must be running).
 
 Usage:
-    1. Start Rain World with the RainWorldRL mod installed
-    2. Load into a game (start a new game or continue)
-    3. Run this script: python -m rainworld_rl.python.test_env
+    python -m rainworld_rl.python.test_env [--launch] [--no-wipe] [--steps N] ...
 """
 
+from __future__ import annotations
+
 import argparse
+import logging
 import time
 
 import numpy as np
 
+from .launcher import kill_game
 from .rainworld_env import RainWorldEnv
+from .shared_memory import DISCRETE_ACTION_NAMES, GameNotRunningError
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description = "Test Rain World RL environment")
-    parser.add_argument(
-        "--width", type = int, default = 320, help = "Frame width (default: 320)"
-    )
-    parser.add_argument(
-        "--height", type = int, default = 240, help = "Frame height (default: 240)"
-    )
-    parser.add_argument(
-        "--ticks", type = int, default = 4, help = "Ticks per step (default: 4)"
-    )
-    parser.add_argument(
-        "--steps", type = int, default = 1000, help = "Number of steps to run (default: 1000)"
-    )
-    parser.add_argument(
-        "--timeout", type = float, default = 30.0, help = "Connection timeout (default: 30)"
-    )
-    parser.add_argument(
-        "--render", action = "store_true", help = "Save frames as images"
-    )
-    parser.add_argument(
-        "--debug", action = "store_true", help = "Print detailed timing debug info"
-    )
+    parser.add_argument("--width", type = int, default = 320, help = "Frame width (default: 320)")
+    parser.add_argument("--height", type = int, default = 240, help = "Frame height (default: 240)")
+    parser.add_argument("--ticks", type = int, default = 4, help = "Ticks per step (default: 4)")
+    parser.add_argument("--steps", type = int, default = 1000, help = "Number of steps to run (default: 1000)")
+    parser.add_argument("--ready-timeout", type = float, default = 60.0, help = "Seconds to wait for READY (default: 60)")
+    parser.add_argument("--launch", action = "store_true", help = "Build the mod and (re)start the game before connecting")
+    parser.add_argument("--no-build", action = "store_true", help = "With --launch: skip dotnet build")
+    parser.add_argument("--no-wipe", action = "store_true", help = "Attach to the game in progress instead of sending RESET")
+    parser.add_argument("--info-every", type = int, default = 100, help = "Print info fields every N steps (default: 100)")
+    parser.add_argument("--render", action = "store_true", help = "Save frames as PNG images")
+    parser.add_argument("--debug", action = "store_true", help = "Print detailed timing debug info")
+    parser.add_argument("--kill", action = "store_true", help = "Close the game when the script finishes")
     args = parser.parse_args()
 
-    print(f"Creating environment ({args.width}x{args.height}, {args.ticks} ticks/step)")
+    logging.basicConfig(level = logging.INFO, format = "%(levelname)s %(name)s: %(message)s")
 
+    print(f"Creating environment ({args.width}x{args.height}, {args.ticks} ticks/step)")
     env = RainWorldEnv(
         frame_width = args.width,
         frame_height = args.height,
         ticks_per_step = args.ticks,
-        connection_timeout = args.timeout,
+        ready_timeout = args.ready_timeout,
         render_mode = "rgb_array" if args.render else None,
         debug_timing = args.debug,
     )
 
-    try:
-        print(f"Connecting to Rain World (timeout: {args.timeout}s)...")
-        obs, info = env.reset()
-        print(f"Connected! Initial observation shape: {obs.shape}")
+    step_times = []
+    action_counts = np.zeros(env.action_space.n, dtype = np.int64)
+    deaths = 0
+    steps_done = 0
 
+    try:
+        if args.launch:
+            print("Launching Rain World (build + restart)...")
+            env.launch(build = not args.no_build)
+        else:
+            print("Connecting to a running Rain World...")
+            try:
+                env.connect(wait_ready = True)
+            except GameNotRunningError as e:
+                print(f"\n{e}\n\nTip: pass --launch to start it from here.")
+                return 1
+        print("Connected.")
+
+        wipe = not args.no_wipe
+        print("Resetting (fresh game)..." if wipe else "Attaching to game in progress (no wipe)...")
+        obs, info = env.reset(options = {"wipe": wipe})
+        print(f"Initial observation shape: {obs.shape}")
+        print_info(0, info)
         if args.render:
             save_frame(obs, 0)
 
-        # Statistics
-        step_times = []
-        action_counts = np.zeros(18, dtype = np.int32)
-
         print(f"\nRunning {args.steps} steps with random actions...")
-        print("-" * 50)
+        print("-" * 60)
 
         for step in range(args.steps):
-            # Random action
             action = env.action_space.sample()
             action_counts[action] += 1
 
-            # Step
             start_time = time.perf_counter()
             obs, reward, terminated, truncated, info = env.step(action)
-            step_time = time.perf_counter() - start_time
-            step_times.append(step_time)
+            step_times.append(time.perf_counter() - start_time)
+            steps_done = step + 1
 
-            # Progress report every 100 steps
-            if (step + 1) % 100 == 0:
-                avg_time = np.mean(step_times[-100:])
-                fps = 1.0 / avg_time if avg_time > 0 else 0
-                print(f"Step {step + 1}/{args.steps} | Avg step time: {avg_time*1000:.2f}ms | FPS: {fps:.1f}")
+            if info["player_dead"]:
+                deaths += 1
+                print(
+                    f"  ** player_dead at step {steps_done} "
+                    f"(cycle {info['cycle_number']}, room {info['room_index']}, karma {info['karma']})"
+                )
 
-            if args.render and (step + 1) % 10 == 0:
-                save_frame(obs, step + 1)
+            if steps_done % args.info_every == 0:
+                avg_time = float(np.mean(step_times[-args.info_every:]))
+                fps = 1.0 / avg_time if avg_time > 0 else 0.0
+                print(f"Step {steps_done}/{args.steps} | avg step {avg_time * 1000:.2f}ms | {fps:.1f} steps/s")
+                print_info(steps_done, info)
 
-            # Check if player died
-            if info.get("player_dead", False):
-                print(f"  Player died at step {step + 1}")
-
-        print("-" * 50)
-        print("\nTest complete!")
-        print(f"Total steps: {args.steps}")
-        print(f"Average step time: {np.mean(step_times)*1000:.2f}ms")
-        print(f"Effective FPS: {1.0/np.mean(step_times):.1f}")
-        print(f"Min step time: {np.min(step_times)*1000:.2f}ms")
-        print(f"Max step time: {np.max(step_times)*1000:.2f}ms")
-
-        # Action distribution
-        print("\nAction distribution:")
-        action_names = [
-            "No-op", "Left", "Right", "Up", "Down",
-            "Jump", "Grab", "Throw",
-            "Left+Jump", "Right+Jump", "Up+Jump", "Down+Jump",
-            "Left+Grab", "Right+Grab", "Up+Grab", "Down+Grab",
-            "Crawl Left", "Crawl Right",
-        ]
-        for i, count in enumerate(action_counts):
-            if count > 0:
-                print(f"  {action_names[i]}: {count} ({100*count/args.steps:.1f}%)")
+            if args.render and steps_done % 10 == 0:
+                save_frame(obs, steps_done)
 
     except KeyboardInterrupt:
         print("\nInterrupted by user")
-    except Exception as e:
-        print(f"\nError: {e}")
-        raise
     finally:
         env.close()
-        print("\nEnvironment closed")
+        if args.kill:
+            kill_game()
+            print("\nEnvironment closed, game killed")
+        else:
+            print("\nEnvironment closed (game left running)")
+
+    if step_times:
+        print("-" * 60)
+        print(f"Steps: {steps_done}  Deaths: {deaths}")
+        print(f"Average step time: {np.mean(step_times) * 1000:.2f}ms  ({1.0 / np.mean(step_times):.1f} steps/s)")
+        print(f"Min/Max step time: {np.min(step_times) * 1000:.2f}ms / {np.max(step_times) * 1000:.2f}ms")
+        print("\nAction distribution:")
+        for i, count in enumerate(action_counts):
+            if count > 0:
+                print(f"  {DISCRETE_ACTION_NAMES[i]}: {count} ({100 * count / steps_done:.1f}%)")
+    return 0
 
 
-def save_frame(frame: np.ndarray, step: int):
+def print_info(step: int, info: dict) -> None:
+    x, y = info["player_pos"]
+    print(
+        f"  [info @ {step}] in_game={info['in_game']} ready={info['ready']} override={info['human_override']} "
+        f"cycle={info['cycle_number']} room={info['room_index']} pos=({x:.0f}, {y:.0f}) "
+        f"karma={info['karma']}/{info['karma_cap']} food={info['food']} step_counter={info['step_counter']}"
+    )
+
+
+def save_frame(frame: np.ndarray, step: int) -> None:
     """Save a frame as a PNG image."""
     try:
         from PIL import Image
-        img = Image.fromarray(frame)
-        img.save(f"frame_{step:06d}.png")
     except ImportError:
         print("Warning: PIL not installed, cannot save frames")
+        return
+    Image.fromarray(frame).save(f"frame_{step:06d}.png")
 
 
 if __name__ == "__main__":
-    main()
-
+    raise SystemExit(main())
