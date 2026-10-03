@@ -7,7 +7,7 @@ using System.IO.MemoryMappedFiles;
 ///
 /// Header layout (64 bytes):
 ///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
-///   1   u8   action           py->mod legacy v2 bitfield (v3 uses action_bits at 44)
+///   1   u8   reserved         (was the v2 action byte; v3 clients write action_bits at 44)
 ///   2   u8   ticks_per_step   py->mod (0 treated as 1)
 ///   3   u8   status           shared bitfield; each side only writes its own bits
 ///   4   u32  frame_width      py->mod
@@ -26,7 +26,7 @@ using System.IO.MemoryMappedFiles;
 ///   32  f32  player_y
 ///   36  i32  room_index       (-1 if unavailable)
 ///   40  i32  cycle_number     (-1 if unavailable)
-///   44  u32  action_bits      py->mod v3 action bitfield (bit list in PROTOCOL.md)
+///   44  u32  action_bits      py->mod raw-key bitfield, one bit per key (KEY_* below, PROTOCOL.md "Action bits")
 ///   48  f32  cycle_progress   mod->py fraction of the cycle elapsed (0..1, >1 once rain starts)
 ///   52  12B  reserved
 ///   64  N    frame            RGB24, top row first
@@ -57,7 +57,7 @@ public class SharedMemoryBridge : IDisposable
 
     // Header offsets
     private const int OFFSET_SYNC_FLAG = 0;
-    private const int OFFSET_ACTION = 1;
+    // offset 1 is reserved (legacy v2 action byte, no longer read)
     private const int OFFSET_TICKS_PER_STEP = 2;
     private const int OFFSET_STATUS = 3;
     private const int OFFSET_WIDTH = 4;
@@ -79,12 +79,23 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_CYCLE_PROGRESS = 48;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
-    // Action bitfield masks
-    public const byte ACTION_JUMP = 0x01;
-    public const byte ACTION_GRAB = 0x02;
-    public const byte ACTION_THROW = 0x04;
-    public const byte ACTION_HORIZONTAL_MASK = 0x18; // bits 3-4
-    public const byte ACTION_VERTICAL_MASK = 0x60;   // bits 5-6
+    // action_bits (offset 44): one bit per player key. Must match rainworld_rl/shared_memory.py KEY_*
+    // and the "Action bits" table in docs/PROTOCOL.md. Any combination may be set at once.
+    // Game evidence (v1.11.8 decompile): RWInput.PlayerInputLogic reads Rewired actions
+    // 0 Jump, 1 MoveHorizontal, 2 MoveVertical, 3 Take (pckp), 4 Throw, 11 Map, 34 Special
+    // (RWInput.cs:187-207, RewiredConsts/Action.cs). Pause (action 5 / Escape) is deliberately
+    // NOT a key: the agent must never pause or quit.
+    public const uint KEY_LEFT = 1u << 0;    // MoveHorizontal negative -> InputPackage.x = -1
+    public const uint KEY_RIGHT = 1u << 1;   // MoveHorizontal positive -> x = +1 (both held -> 0)
+    public const uint KEY_UP = 1u << 2;      // MoveVertical positive   -> y = +1
+    public const uint KEY_DOWN = 1u << 3;    // MoveVertical negative   -> y = -1 (both held -> 0)
+    public const uint KEY_JUMP = 1u << 4;    // jmp  (UI: submit / "continue")
+    public const uint KEY_GRAB = 1u << 5;    // pckp (pick up / eat / interact)
+    public const uint KEY_THROW = 1u << 6;   // thrw (UI: cancel)
+    public const uint KEY_MAP = 1u << 7;     // mp   (map; also "press to restart" on the game-over prompt)
+    public const uint KEY_SPECIAL = 1u << 8; // spec (Watcher warp/camo, Saint ascension, Artificer pyro-jump)
+    public const int KEY_COUNT = 9;
+    public const uint KEY_ALL_MASK = (1u << KEY_COUNT) - 1;
 
     // Status bits (offset 3)
     public const byte STATUS_PLAYER_DEAD = 0x01;    // mod, edge-triggered
@@ -121,7 +132,7 @@ public class SharedMemoryBridge : IDisposable
         accessor = mmf.CreateViewAccessor();
 
         // Reset the handshake and our own status bits. Python's CONNECTED bit and
-        // the py->mod fields (action, dims, command) are left untouched in case the
+        // the py->mod fields (action_bits, dims, command) are left untouched in case the
         // client attached first.
         WriteSyncFlag(SYNC_IDLE);
         UpdateStatusBits(MOD_OWNED_STATUS_MASK, 0);
@@ -145,10 +156,8 @@ public class SharedMemoryBridge : IDisposable
 
     // ----- py -> mod inputs -----
 
-    public byte ReadAction() => accessor.ReadByte(OFFSET_ACTION);
-
-    /// <summary>Reads the protocol v3 action bitfield (offset 44).</summary>
-    public uint ReadActionBits() => accessor.ReadUInt32(OFFSET_ACTION_BITS);
+    /// <summary>Reads the raw-key action bitfield (offset 44), masked to the known keys.</summary>
+    public uint ReadActionBits() => accessor.ReadUInt32(OFFSET_ACTION_BITS) & KEY_ALL_MASK;
 
     public byte ReadTicksPerStep()
     {

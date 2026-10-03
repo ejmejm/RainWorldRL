@@ -10,11 +10,13 @@ using UnityEngine;
 
 /// <summary>
 /// Rain World RL - Turns Rain World into a reinforcement learning environment.
-/// Communicates with Python via shared memory (protocol v2, docs/PROTOCOL.md).
+/// Communicates with Python via shared memory (protocol v3, docs/PROTOCOL.md).
 ///
 /// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
 /// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
-/// save). F10 toggles HUMAN_OVERRIDE while RL mode is on.
+/// save). F10 toggles HUMAN_OVERRIDE while RL mode is on. Actions are raw key bitfields
+/// (SharedMemoryBridge.KEY_*) injected by InputInjector; the pause button is blocked while the
+/// agent is in control.
 /// </summary>
 [BepInPlugin("rainworld.rl", "RainWorldRL", "0.2")]
 public class RainWorldRL : BaseUnityPlugin

@@ -35,7 +35,7 @@ class FakeMapping(bytearray):
         self.service_commands = True
         self.fail_commands = False
         self.closed = False
-        self.steps_serviced: List[tuple] = []   # (action_byte, ticks)
+        self.steps_serviced: List[tuple] = []   # (action_bits, ticks)
         self.commands_received: List[int] = []
         self.fill_value = 7                      # byte written into the frame
         self.mod_fields = dict(
@@ -80,7 +80,8 @@ class FakeMapping(bytearray):
 
     def service_step(self) -> None:
         h = self.header()
-        self.steps_serviced.append((h.action, h.ticks_per_step))
+        # Like the mod: read the raw-key bitfield at offset 44 (the legacy byte at offset 1 is ignored).
+        self.steps_serviced.append((h.action_bits, h.ticks_per_step))
         self.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_PROCESSING,)))
         w, hgt = h.frame_width, h.frame_height
         size = w * hgt * 3

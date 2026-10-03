@@ -92,7 +92,52 @@ fields are zero / -1 then.
 
 ### Actions
 
-`Discrete(18)`; names in `shared_memory.DISCRETE_ACTION_NAMES`:
+The native action space is **raw key presses**: `MultiBinary(9)`, one entry
+per key the player can hold, any combination at once. The bit/index order is
+`rainworld_rl.KEY_NAMES`:
+
+| index | key | what it does |
+|------:|-----|--------------|
+| 0 | `left` | move left (left + right together cancel out) |
+| 1 | `right` | move right |
+| 2 | `up` | up / climb / look up |
+| 3 | `down` | down / crouch; with a side key: crawl / roll direction |
+| 4 | `jump` | jump; also "continue" in dialogs and prompts |
+| 5 | `grab` | pick up / eat / interact |
+| 6 | `throw` | throw; also "cancel" in dialogs |
+| 7 | `map` | hold to show the map; restarts from the game-over prompt |
+| 8 | `special` | slugcat ability (Watcher warp/camo, Saint ascension, Artificer pyro-jump). No-op for Survivor/Monk/Hunter |
+
+`env.step()` accepts either a length-9 0/1 vector (e.g. `env.action_space.sample()`)
+**or** a plain `int` bitmask built from `KEY_*` constants:
+
+```python
+from rainworld_rl import RainWorldEnv, KEY_RIGHT, KEY_JUMP, encode_keys, pressed_key_names
+
+env.step([0, 1, 0, 0, 1, 0, 0, 0, 0])      # right + jump as a vector
+env.step(KEY_RIGHT | KEY_JUMP)             # same, as a bitmask
+env.step(encode_keys("right", "jump"))     # same, by name
+pressed_key_names(KEY_RIGHT | KEY_JUMP)    # ('right', 'jump')
+```
+
+Pause/Escape and menu-exit are intentionally not in the action space; the mod
+blocks the pause button while the agent is in control and dismisses a pause
+menu it finds open. In-game prompts that wait for a key (a dialog box, the
+game-over "press SPACE to restart") receive the agent's keys; `info["dialog_open"]`
+is `True` while one is waiting.
+
+#### Optional: `DiscreteActions` wrapper (Discrete(18))
+
+The classic 18-action set is available as an **optional** `gymnasium.ActionWrapper`
+in `rainworld_rl.wrappers`; the mod itself only ever sees key bits:
+
+```python
+from rainworld_rl import RainWorldEnv, DiscreteActions, ACTION_NAMES
+
+env = DiscreteActions(RainWorldEnv(160, 90, ticks_per_step = 4))
+env.action_space        # Discrete(18)
+env.step(9)             # ACTION_NAMES[9] == "Right+Jump"
+```
 
 ```
 0 No-op   1 Left   2 Right   3 Up   4 Down   5 Jump   6 Grab   7 Throw
@@ -101,8 +146,10 @@ fields are zero / -1 then.
 16 Crawl Left (Left+Down)   17 Crawl Right (Right+Down)
 ```
 
-For arbitrary combinations use `SharedMemoryClient.send_action(jump, grab,
-throw, horizontal, vertical, ticks_per_step)` directly.
+`wrappers.DISCRETE_ACTIONS[i]` lists the keys held by action `i`;
+`wrappers.discrete_to_bits(i)` / `discrete_to_keys(i)` convert. Note the discrete
+set has no `map`/`special`, so a discrete agent cannot dismiss the game-over
+prompt or use slugcat abilities.
 
 ### F10 human override
 
@@ -166,13 +213,15 @@ assemblies locked.
 ## Smoke test
 
 ```
-python -m rainworld_rl.test_env            # connect to a running game, RESET, 1000 random steps
+python -m rainworld_rl.test_env            # connect to a running game, RESET, 1000 random key combos
 python -m rainworld_rl.test_env --launch   # build + restart the game first
 python -m rainworld_rl.test_env --no-wipe  # attach without resetting
+python -m rainworld_rl.test_env --discrete # sample from the Discrete(18) wrapper instead
 ```
 
-Prints the `info` fields every 100 steps and a line whenever `player_dead`
-fires.
+Prints the `info` fields every 100 steps, a line whenever `player_dead`
+fires, and at the end how often each key was held (plus the most common
+combinations, and the discrete action distribution with `--discrete`).
 
 ## Low-level client
 
@@ -181,7 +230,7 @@ mapping_factory=None)` wraps the mapping directly:
 
 - `connect(wait_ready=True, ready_timeout=60, liveness_timeout=2)` / `disconnect()`
 - `wait_for_alive(timeout)`, `wait_for_ready(timeout)`
-- `send_action(...)`, `send_action_discrete(action, ticks)`, `wait_for_frame(timeout) -> (frame, ModState)`, `step(action, ticks, timeout)`
+- `send_action(action, ticks)` (bitmask or key vector), `send_action_bits(bits, ticks)`, `send_keys("right", "jump", ticks_per_step=1)`, `wait_for_frame(timeout) -> (frame, ModState)`, `step(action, ticks, timeout)`
 - `send_command(command, timeout)`, `reset_game(timeout)`
 - `read_state() -> ModState` (whole 64-byte header via one `struct.Struct` read), `set_connected(bool)` (read-modify-write of Python's bit only)
 
