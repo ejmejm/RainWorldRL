@@ -59,6 +59,16 @@ INFO_CONTRACT: Dict[str, Tuple[type, ...]] = {
     "step_counter": (numbers.Integral,),
     "in_game": (bool, numbers.Integral),
     "human_override": (bool, numbers.Integral),
+    # protocol v3 game-state fields
+    "ready": (bool, numbers.Integral),
+    "food_max": (numbers.Integral,),
+    "food_to_hibernate": (numbers.Integral,),
+    "malnourished": (bool, numbers.Integral),
+    "cycle_progress": (numbers.Real,),
+    "in_shelter": (bool, numbers.Integral),
+    "cycle_survived": (bool, numbers.Integral),
+    "rain": (bool, numbers.Integral),
+    "dialog_open": (bool, numbers.Integral),
 }
 
 StepResult = Tuple[Any, Dict[str, Any]]

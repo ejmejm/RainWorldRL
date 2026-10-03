@@ -1,7 +1,7 @@
 """
 Shared memory client for communicating with the Rain World RL mod.
 
-Implements protocol v2 as described in ``docs/PROTOCOL.md``. The mapping is a
+Implements protocol v3 as described in ``docs/PROTOCOL.md``. The mapping is a
 named memory-mapped file (``RainWorldRL``) consisting of a 64-byte header
 followed by an RGB24 frame of up to 1920x1080.
 
@@ -14,20 +14,25 @@ Header layout (all little-endian)::
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
-    12     1    py->mod command         0 NONE, 1 RESET
+    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
-    14     2    -       reserved
+    14     1    mod->py game_flags      see GAME_FLAG_* bits
+    15     1    -       reserved
     16     4    mod->py heartbeat       uint32, bumped every Unity Update
     20     4    mod->py step_counter    uint32, bumped once per completed step
     24     1    mod->py karma           uint8
     25     1    mod->py karma_cap       uint8
     26     1    mod->py food            uint8
-    27     1    -       reserved
+    27     1    mod->py food_max        uint8, the slugcat's maximum food pips
     28     4    mod->py player_x        float32
     32     4    mod->py player_y        float32
     36     4    mod->py room_index      int32 (-1 if unavailable)
     40     4    mod->py cycle_number    int32 (-1 if unavailable)
-    44     20   -       reserved
+    44     4    py->mod action_bits     uint32, protocol v3 action bitfield
+    48     4    mod->py cycle_progress  float32, RainCycle timer / cycleLength (>1 once the rain falls)
+    52     1    mod->py food_to_hibernate uint8, pips needed to sleep this cycle (== food_max while malnourished)
+    53     1    mod->py malnourished    uint8 0/1, the previous sleep was a starving one
+    54     10   -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
 
 Status byte: bit 1 (``CONNECTED``) is owned by Python, every other bit is
@@ -94,6 +99,8 @@ OFFSET_ROOM_INDEX = 36
 OFFSET_CYCLE_NUMBER = 40
 OFFSET_ACTION_BITS = 44       # py->mod uint32, protocol v3 action bitfield (see PROTOCOL.md)
 OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
+OFFSET_FOOD_TO_HIBERNATE = 52 # mod->py uint8
+OFFSET_MALNOURISHED = 53      # mod->py uint8 (0/1)
 OFFSET_FRAME_DATA = HEADER_SIZE
 
 # Action bitfield
@@ -126,8 +133,8 @@ COMMAND_RESULT_ERROR = 2
 
 # game_flags (offset 14, mod-owned, protocol v3)
 GAME_FLAG_IN_SHELTER = 0x01      # level: player is inside a shelter room
-GAME_FLAG_CYCLE_SURVIVED = 0x02  # edge: the cycle was survived (hibernation) during this step
-GAME_FLAG_RAIN = 0x04            # level: the rain/cycle-end has started
+GAME_FLAG_CYCLE_SURVIVED = 0x02  # edge: hibernated with enough food during this step (a starving sleep does not count)
+GAME_FLAG_RAIN = 0x04            # level: the cycle timer has expired and the lethal rain is falling
 GAME_FLAG_DIALOG_OPEN = 0x08     # level: an in-game text/dialog overlay awaits player input
 
 NUM_DISCRETE_ACTIONS = 18
@@ -157,7 +164,9 @@ HEADER_STRUCT = struct.Struct(
     "i"    # cycle_number
     "I"    # action_bits
     "f"    # cycle_progress
-    "12x"  # reserved
+    "B"    # food_to_hibernate
+    "B"    # malnourished
+    "10x"  # reserved
 )
 assert HEADER_STRUCT.size == HEADER_SIZE, HEADER_STRUCT.size
 
@@ -226,6 +235,8 @@ class ModState:
     cycle_number: int = -1
     action_bits: int = 0
     cycle_progress: float = 0.0
+    food_to_hibernate: int = 0
+    malnourished: int = 0  # 0/1
 
     # -- status bits -------------------------------------------------------
 
@@ -299,6 +310,8 @@ class ModState:
             int(self.cycle_number),
             self.action_bits & 0xFFFFFFFF,
             float(self.cycle_progress),
+            self.food_to_hibernate & 0xFF,
+            int(bool(self.malnourished)),
         )
 
     @classmethod
@@ -327,6 +340,8 @@ class ModState:
             "rain": self.rain,
             "dialog_open": self.dialog_open,
             "cycle_progress": self.cycle_progress,
+            "food_to_hibernate": self.food_to_hibernate,
+            "malnourished": bool(self.malnourished),
         }
 
 

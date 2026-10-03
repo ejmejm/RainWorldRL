@@ -41,8 +41,12 @@ class FakeMapping(bytearray):
         self.mod_fields = dict(
             karma = 3, karma_cap = 5, food = 2, player_x = 123.5, player_y = -4.25,
             room_index = 42, cycle_number = 1,
+            # protocol v3 game-state fields
+            food_max = 7, food_to_hibernate = 4, malnourished = 0, cycle_progress = 0.0,
+            game_flags = 0,                      # level bits (GAME_FLAG_IN_SHELTER, ...)
         )
         self.next_step_dead = False
+        self.next_step_game_flags = 0            # one-shot edge bits OR-ed into the next step only
         if alive:
             self.set_mod_bit(sm.STATUS_MOD_ALIVE, True)
 
@@ -72,10 +76,13 @@ class FakeMapping(bytearray):
         hb = struct.unpack_from("<I", self, sm.OFFSET_HEARTBEAT)[0]
         self.put(sm.OFFSET_HEARTBEAT, struct.pack("<I", (hb + 1) & 0xFFFFFFFF))
 
-    def write_mod_fields(self, dead: bool = False) -> None:
+    def write_mod_fields(self, dead: bool = False, game_flags: int | None = None) -> None:
         f = self.mod_fields
-        self.put(sm.OFFSET_KARMA, bytes((f["karma"], f["karma_cap"], f["food"])))
+        self.put(sm.OFFSET_KARMA, bytes((f["karma"], f["karma_cap"], f["food"], f["food_max"])))
         self.put(sm.OFFSET_PLAYER_X, struct.pack("<ffii", f["player_x"], f["player_y"], f["room_index"], f["cycle_number"]))
+        self.put(sm.OFFSET_CYCLE_PROGRESS, struct.pack("<fBB", f["cycle_progress"], f["food_to_hibernate"], int(bool(f["malnourished"]))))
+        flags = f["game_flags"] if game_flags is None else game_flags
+        self.put(sm.OFFSET_GAME_FLAGS, bytes((flags & 0xFF,)))
         self.set_mod_bit(sm.STATUS_PLAYER_DEAD, dead)
 
     def service_step(self) -> None:
@@ -85,8 +92,10 @@ class FakeMapping(bytearray):
         w, hgt = h.frame_width, h.frame_height
         size = w * hgt * 3
         self.put(sm.OFFSET_FRAME_DATA, bytes([self.fill_value]) * size)
-        self.write_mod_fields(dead = self.next_step_dead)
+        self.write_mod_fields(dead = self.next_step_dead,
+                              game_flags = self.mod_fields["game_flags"] | self.next_step_game_flags)
         self.next_step_dead = False
+        self.next_step_game_flags = 0
         self.put(sm.OFFSET_STEP_COUNTER, struct.pack("<I", h.step_counter + 1))
         self.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_FRAME_READY,)))  # flag LAST
 

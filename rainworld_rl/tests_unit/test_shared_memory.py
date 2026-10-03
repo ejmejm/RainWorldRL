@@ -74,7 +74,7 @@ def test_to_info_contains_expected_fields():
     state = ModState(status = sm.STATUS_PLAYER_DEAD | sm.STATUS_IN_GAME | sm.STATUS_READY,
                      karma = 2, karma_cap = 4, food = 1, player_x = 3.0, player_y = 4.0,
                      room_index = 5, cycle_number = 6, step_counter = 7,
-                     food_max = 7, cycle_progress = 0.25,
+                     food_max = 7, cycle_progress = 0.25, food_to_hibernate = 4, malnourished = 1,
                      game_flags = sm.GAME_FLAG_IN_SHELTER | sm.GAME_FLAG_CYCLE_SURVIVED)
     info = state.to_info()
     assert info == {
@@ -82,8 +82,41 @@ def test_to_info_contains_expected_fields():
         "player_pos": (3.0, 4.0), "room_index": 5, "cycle_number": 6,
         "step_counter": 7, "in_game": True, "ready": True, "human_override": False,
         "in_shelter": True, "cycle_survived": True, "rain": False, "dialog_open": False,
-        "cycle_progress": 0.25,
+        "cycle_progress": 0.25, "food_to_hibernate": 4, "malnourished": True,
     }
+    assert info["malnourished"] is True
+
+
+def test_v3_game_state_fields_round_trip():
+    state = ModState(food_max = 9, food_to_hibernate = 6, malnourished = 1, cycle_progress = 1.25,
+                     game_flags = sm.GAME_FLAG_RAIN | sm.GAME_FLAG_DIALOG_OPEN)
+    raw = state.pack()
+    assert raw[sm.OFFSET_FOOD_MAX] == 9
+    assert raw[sm.OFFSET_FOOD_TO_HIBERNATE] == 6
+    assert raw[sm.OFFSET_MALNOURISHED] == 1
+    assert raw[54:64] == bytes(10)                      # reserved tail untouched
+    again = ModState.unpack(raw)
+    assert again == state
+    assert again.rain and again.dialog_open and not again.in_shelter and not again.cycle_survived
+    assert again.cycle_progress == 1.25
+
+
+def test_fake_mapping_writes_v3_fields():
+    mapping = FakeMapping()
+    mapping.mod_fields.update(food_max = 5, food_to_hibernate = 3, malnourished = 1, cycle_progress = 0.5,
+                              game_flags = sm.GAME_FLAG_IN_SHELTER)
+    mapping.next_step_game_flags = sm.GAME_FLAG_CYCLE_SURVIVED
+    mapping.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_ACTION_READY,)))
+    mapping.service_step()
+    info = mapping.header().to_info()
+    assert (info["food_max"], info["food_to_hibernate"], info["malnourished"]) == (5, 3, True)
+    assert info["cycle_progress"] == 0.5
+    assert info["in_shelter"] and info["cycle_survived"] and not info["rain"]
+    # the edge bit is one-shot
+    mapping.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_ACTION_READY,)))
+    mapping.service_step()
+    info = mapping.header().to_info()
+    assert info["in_shelter"] and not info["cycle_survived"]
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +424,7 @@ def test_env_reset_sends_reset_and_returns_frame_and_info():
         "player_dead", "karma", "karma_cap", "food", "player_pos", "room_index",
         "cycle_number", "step_counter", "in_game", "ready", "human_override",
         "food_max", "in_shelter", "cycle_survived", "rain", "dialog_open", "cycle_progress",
+        "food_to_hibernate", "malnourished",
     }
     assert env.connected
 

@@ -15,6 +15,23 @@ using UnityEngine;
 ///   -> ProcessPostRender captures frame, writes game state + status, step_counter++, writes FRAME_READY last
 ///   -> Python reads frame, writes IDLE
 ///
+/// Per-step game state (offsets 24..53 and the IN_SHELTER / RAIN / CYCLE_SURVIVED game_flags bits):
+///   food_max / food_to_hibernate : StoryGameSession.characterStats.maxFood / .foodToHibernate
+///                                  (SlugcatStats.cs:77/79; foodToHibernate == maxFood while malnourished, ctor)
+///   malnourished                 : SaveState.malnourished (SaveState.cs:18, set by SessionEnded :294-297)
+///   cycle_progress               : RainCycle.timer / cycleLength (RainCycle.cs:15/17); timer keeps counting
+///                                  past cycleLength (:417) so the value exceeds 1 once the rain is falling.
+///                                  (First cycle of a fresh save: the overseer tutorial pins timer = 2000 until
+///                                  the player leaves the start rooms, OverseerTutorialBehavior.cs:1769/2015.)
+///   IN_SHELTER                   : player.room.abstractRoom.shelter (AbstractRoom.cs:112)
+///   RAIN                         : RainCycle.TimeUntilRain <= 0, i.e. RainCycle.RainGameOver (RainCycle.cs:55/139):
+///                                  the cycle timer has expired and the lethal rain is falling
+///   CYCLE_SURVIVED (edge)        : latched by the On.RainWorldGame.Win hook (RainWorldGame.cs:1578) when the
+///                                  player hibernated with enough food (malnourished == false; ShelterDoor.cs:1788),
+///                                  reported on the next frame written and then cleared. A starving sleep
+///                                  (Win(malnourished: true) -> StarveScreen) does not count; it is visible as
+///                                  cycle_number + 1 together with malnourished == 1.
+///
 /// Human override (<see cref="SetPaused"/>): no new actions are consumed, timescale is 1 and the
 /// keyboard passes through. A step already in flight finishes normally (at 1x) so Python still
 /// gets its frame; a pending ACTION_READY is serviced once override is cleared.
@@ -47,6 +64,10 @@ public class StepController
     private AbstractCreature trackedPlayer = null;
     private bool prevDead = false;
 
+    // Cycle-survived edge: set by the RainWorldGame.Win hook, consumed by the next frame write
+    private bool hooksInstalled = false;
+    private bool pendingCycleSurvived = false;
+
     // Original settings to restore on disable
     private float originalTimeScale;
     private float originalMaxDeltaTime;
@@ -78,6 +99,49 @@ public class StepController
         this.inputInjector = inputInjector;
         this.frameCapture = frameCapture;
         this.log = log;
+    }
+
+    /// <summary>Installs the RainWorldGame.Win hook used for the CYCLE_SURVIVED edge.</summary>
+    public void Install()
+    {
+        if (hooksInstalled)
+            return;
+
+        On.RainWorldGame.Win += RainWorldGame_Win;
+        hooksInstalled = true;
+    }
+
+    public void Uninstall()
+    {
+        if (!hooksInstalled)
+            return;
+
+        On.RainWorldGame.Win -= RainWorldGame_Win;
+        hooksInstalled = false;
+    }
+
+    /// <summary>
+    /// RainWorldGame.Win is the hibernation path (ShelterDoor.cs:1788 and the Watcher warp/echo paths).
+    /// It is a no-op while a process switch is already pending (RainWorldGame.cs:1581), so only latch
+    /// when it actually ran. malnourished == true is the starving sleep (StarveScreen) and is not counted.
+    /// </summary>
+    private void RainWorldGame_Win(On.RainWorldGame.orig_Win orig, RainWorldGame self, bool malnourished, bool fromWarpPoint)
+    {
+        bool blocked = self.manager != null && self.manager.upcomingProcess != null;
+        orig(self, malnourished, fromWarpPoint);
+
+        if (!enabled || blocked)
+            return;
+
+        if (!malnourished)
+        {
+            pendingCycleSurvived = true;
+            log?.LogInfo("[StepController] Cycle survived (hibernation)");
+        }
+        else
+        {
+            log?.LogInfo("[StepController] Starving sleep (malnourished); not counted as cycle survived");
+        }
     }
 
     /// <summary>Called from the plugin's RainWorld.Update hook every frame.</summary>
@@ -132,6 +196,7 @@ public class StepController
         paused = false;
         trackedPlayer = null;
         prevDead = false;
+        pendingCycleSurvived = false;
 
         enabled = true;
         log?.LogInfo("[StepController] Enabled");
@@ -166,6 +231,7 @@ public class StepController
         stepInProgress = false;
         waitingForFrameCapture = false;
         paused = false;
+        pendingCycleSurvived = false;
 
         enabled = false;
         log?.LogInfo("[StepController] Disabled");
@@ -267,6 +333,11 @@ public class StepController
         bool deathEdge = WriteGameState();
         sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_PLAYER_DEAD, deathEdge);
 
+        // Cycle-survived edge: reported on exactly one frame, whether or not the game is still
+        // the current process (the SleepScreen -> Game redirect may already have happened).
+        sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_CYCLE_SURVIVED, pendingCycleSurvived);
+        pendingCycleSurvived = false;
+
         sharedMemory.IncrementStepCounter();
 
         // FRAME_READY must be the very last write
@@ -280,9 +351,10 @@ public class StepController
     }
 
     /// <summary>
-    /// Writes karma/food/position/room/cycle (zeros / -1 when unavailable) and returns the death
-    /// edge: true only on the step where player 0 went alive -> dead. Tracking resets whenever a
-    /// different player instance appears (new game / respawn), so the next death is detected again.
+    /// Writes karma/food/position/room/cycle, food_max/food_to_hibernate/malnourished, cycle_progress and
+    /// the IN_SHELTER / RAIN flags (zeros / -1 when unavailable) and returns the death edge: true only on
+    /// the step where player 0 went alive -> dead. Tracking resets whenever a different player instance
+    /// appears (new game / respawn), so the next death is detected again.
     /// </summary>
     private bool WriteGameState()
     {
@@ -314,10 +386,12 @@ public class StepController
 
             // Save-state fields
             int karma = 0, karmaCap = 0, cycle = -1;
+            bool malnourished = false;
             SaveState save = story.saveState;
             if (save != null)
             {
                 cycle = save.cycleNumber;
+                malnourished = save.malnourished;
                 if (save.deathPersistentSaveData != null)
                 {
                     karma = save.deathPersistentSaveData.karma;
@@ -325,10 +399,38 @@ public class StepController
                 }
             }
 
+            // Food meter. characterStats is built from (saveStateNumber, malnourished) in the
+            // StoryGameSession ctor, so foodToHibernate == maxFood while malnourished.
+            int foodMax = 0, foodToHibernate = 0;
+            SlugcatStats stats = story.characterStats;
+            if (stats != null)
+            {
+                foodMax = stats.maxFood;
+                foodToHibernate = stats.foodToHibernate;
+            }
+            else if (story.saveStateNumber != null)
+            {
+                var meter = SlugcatStats.SlugcatFoodMeter(story.saveStateNumber);
+                foodMax = meter.x;
+                foodToHibernate = malnourished ? meter.x : meter.y;
+            }
+
+            // Rain cycle (world may be null while a region loads)
+            float cycleProgress = 0f;
+            bool rain = false;
+            World world = game.overWorld?.activeWorld;
+            RainCycle rainCycle = world?.rainCycle;
+            if (rainCycle != null && rainCycle.cycleLength > 0)
+            {
+                cycleProgress = (float)rainCycle.timer / (float)rainCycle.cycleLength;
+                rain = rainCycle.TimeUntilRain <= 0;
+            }
+
             // Player fields
             int food = 0;
             float x = 0f, y = 0f;
             int roomIndex = -1;
+            AbstractRoom abstractRoom = null;
 
             Player player = abstractPlayer.realizedCreature as Player;
             if (player != null)
@@ -340,7 +442,10 @@ public class StepController
                     y = player.mainBodyChunk.pos.y;
                 }
                 if (player.room != null && player.room.abstractRoom != null)
-                    roomIndex = player.room.abstractRoom.index;
+                {
+                    abstractRoom = player.room.abstractRoom;
+                    roomIndex = abstractRoom.index;
+                }
                 else
                     roomIndex = abstractPlayer.pos.room;
             }
@@ -350,8 +455,17 @@ public class StepController
                     food = ps.foodInStomach;
                 roomIndex = abstractPlayer.pos.room;
             }
+            if (abstractRoom == null && world != null && roomIndex >= 0)
+                abstractRoom = world.GetAbstractRoom(roomIndex);
+            bool inShelter = abstractRoom != null && abstractRoom.shelter;
 
             sharedMemory.WriteGameState(karma, karmaCap, food, x, y, roomIndex, cycle);
+            sharedMemory.WriteFoodMax(foodMax);
+            sharedMemory.WriteFoodToHibernate(foodToHibernate);
+            sharedMemory.WriteMalnourished(malnourished);
+            sharedMemory.WriteCycleProgress(cycleProgress);
+            sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_IN_SHELTER, inShelter);
+            sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_RAIN, rain);
             return edge;
         }
         catch (Exception ex)

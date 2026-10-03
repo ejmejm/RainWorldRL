@@ -142,6 +142,16 @@ class FakeEnv:
             "step_counter": int(self._step_counter),
             "in_game": True,
             "human_override": False,
+            # protocol v3 game-state fields
+            "ready": True,
+            "food_max": 7,
+            "food_to_hibernate": 4,
+            "malnourished": False,
+            "cycle_progress": float(self._step_counter) / 10000.0,
+            "in_shelter": False,
+            "cycle_survived": False,
+            "rain": False,
+            "dialog_open": False,
         }
 
 

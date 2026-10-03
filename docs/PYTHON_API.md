@@ -77,10 +77,18 @@ frame flag):
 |-----|------|---------|
 | `player_dead` | bool | Edge: player died during this step. |
 | `karma`, `karma_cap` | int | Current karma level and cap. |
-| `food` | int | Food pips. |
+| `food` | int | Food pips in the stomach. |
+| `food_max` | int | The slugcat's maximum food pips (Survivor: 7). |
+| `food_to_hibernate` | int | Pips needed to sleep this cycle (Survivor: 4; equals `food_max` while `malnourished`). |
+| `malnourished` | bool | Level: the previous sleep was a starving one; this cycle the slugcat is weaker and needs `food_max` pips to sleep. |
 | `player_pos` | (float, float) | Body chunk 0 position in room coordinates. |
 | `room_index` | int | Abstract room index, -1 if unavailable. |
-| `cycle_number` | int | Save-state cycle number, -1 if unavailable. |
+| `cycle_number` | int | Save-state cycle number, -1 if unavailable. Increments on every sleep (fed or starving). |
+| `cycle_progress` | float | `RainCycle.timer / cycleLength`: 0 at cycle start, 1.0 when the rain arrives, keeps growing while it falls. |
+| `rain` | bool | Level: the cycle timer has expired and the lethal rain is falling (`cycle_progress >= 1`). |
+| `in_shelter` | bool | Level: the player is in a shelter room. |
+| `cycle_survived` | bool | Edge: the player hibernated with enough food during this step (`+1` cycle, karma up). A starving sleep does not set it. |
+| `dialog_open` | bool | Level: an in-game text/dialog overlay awaits input. |
 | `step_counter` | int | Mod-side count of completed steps. |
 | `in_game` | bool | Main process is `RainWorldGame`. |
 | `ready` | bool | Mod is in RL mode with a live player; steps are fully serviced. |
@@ -89,6 +97,47 @@ frame flag):
 When `ready` is `False` (menus, loading, death screen) the mod still answers
 steps with the current rendered frame so the agent never hangs; game-state
 fields are zero / -1 then.
+
+### Rewards
+
+`env.step()` always returns `reward = 0.0`; rewards are wrappers over `info`
+(`rainworld_rl.rewards`, see [REWARDS.md](REWARDS.md) for the philosophy and
+the field semantics). The default is a single sparse signal:
+
+```python
+from rainworld_rl import RainWorldEnv
+from rainworld_rl.rewards import make_default_reward_env
+
+env = make_default_reward_env(RainWorldEnv(ticks_per_step = 4))   # SurviveCycleReward
+obs, reward, terminated, truncated, info = env.step(action)       # reward: +1 when info["cycle_survived"], else 0
+```
+
+`SurviveCycleReward` = `InfoReward(env, [CycleSurvived(1.0)])`: surviving a
+cycle already requires finding food (which depletes locally), finding a
+shelter, timing the rain and avoiding predators, so nothing else is shaped.
+
+Alternatives are composed from `RewardTerm`s, each called as
+`term(prev_info, info) -> float` once per step and `term.reset(info)` on
+`reset()`; the per-term breakdown is written to `info["reward_terms"]`:
+
+```python
+from rainworld_rl.rewards import InfoReward, CycleSurvived, Death, NewRoom, Ate, Alive, FunctionTerm
+
+env = InfoReward(RainWorldEnv(), [CycleSurvived(1.0), Death(-1.0), NewRoom(0.1)])
+env = InfoReward(RainWorldEnv(), [Ate(1.0), Alive(0.001)])
+env = InfoReward(RainWorldEnv(), [FunctionTerm(lambda prev, cur: cur["karma"] - prev["karma"], name = "karma")])
+```
+
+| Term | Default weight | Fires |
+|------|---------------:|-------|
+| `CycleSurvived` | `+1.0` | the step `cycle_survived` is True |
+| `Death` | `-1.0` | the step `player_dead` is True |
+| `NewRoom` | `+1.0` | first entry into each `room_index` (start room counts as visited; cleared on `reset()`) |
+| `Ate` | `+1.0`/pip | `food` increased since the previous step within the same cycle |
+| `Alive` | `+0.01` | every step with real game state and no death |
+| `FunctionTerm(fn, name, weight)` | `1.0` | `weight * fn(prev_info, info)` |
+
+Subclass `RewardTerm` (implement `__call__`, optionally `reset`) for anything else.
 
 ### Actions
 
@@ -187,4 +236,4 @@ mapping_factory=None)` wraps the mapping directly:
 
 `mapping_factory` lets tests inject a `bytearray`-backed fake; see
 `rainworld_rl/tests_unit/`. Run the game-free tests with
-`python -m pytest python/tests_unit -q`.
+`python -m pytest rainworld_rl/tests_unit -q` (or everything game-free with `python -m pytest -q`).
