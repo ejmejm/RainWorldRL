@@ -1,9 +1,9 @@
 """
 Rain World RL - Python client for the Rain World reinforcement learning environment.
 
-Import with the repository's parent directory on ``sys.path``::
+Install with ``pip install -e .`` from the repo root, then::
 
-    from rainworld_rl.python import RainWorldEnv
+    from rainworld_rl import RainWorldEnv
 
     env = RainWorldEnv(160, 90, ticks_per_step = 4)   # cheap, no game contact
     env.launch()                                      # or env.connect() if the game is up

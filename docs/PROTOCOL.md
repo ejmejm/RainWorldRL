@@ -1,4 +1,4 @@
-# Shared Memory Protocol (v2)
+# Shared Memory Protocol (v3)
 
 Named memory-mapped file `RainWorldRL`, created by whichever side comes first
 (`MemoryMappedFile.CreateOrOpen` in C#, `mmap(-1, size, tagname=...)` in Python).
@@ -11,26 +11,39 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | Offset | Size | Dir     | Field              | Notes |
 |-------:|-----:|---------|--------------------|-------|
 | 0      | 1    | both    | `sync_flag`        | 0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING |
-| 1      | 1    | py→mod  | `action`           | bitfield: b0 jump, b1 grab, b2 throw, b3-4 horiz (0 none,1 left,2 right), b5-6 vert (0 none,1 down,2 up) |
+| 1      | 1    | py→mod  | `action` (legacy)  | v2 bitfield: b0 jump, b1 grab, b2 throw, b3-4 horiz (0 none,1 left,2 right), b5-6 vert (0 none,1 down,2 up). **v3 clients write `action_bits` at 44 instead; the mod prefers `action_bits` when nonzero.** |
 | 2      | 1    | py→mod  | `ticks_per_step`   | 1..255, 0 treated as 1 |
 | 3      | 1    | both    | `status`           | see Status bits |
 | 4      | 4    | py→mod  | `frame_width`      | uint32, clamped by mod to 1..1920 (default 160) |
 | 8      | 4    | py→mod  | `frame_height`     | uint32, clamped by mod to 1..1080 (default 90) |
-| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game). Mod sets back to 0 when done. |
+| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested). Mod sets back to 0 when done. |
 | 13     | 1    | mod→py  | `command_result`   | 0 none/in-progress, 1 OK, 2 ERROR. Mod writes after finishing a command; Python clears to 0 before issuing the next. |
-| 14     | 2    | -       | reserved           | |
+| 14     | 1    | mod→py  | `game_flags`       | b0 IN_SHELTER (level), b1 CYCLE_SURVIVED (edge: hibernation succeeded during this step), b2 RAIN (level: cycle end has begun), b3 DIALOG_OPEN (level: a text/dialog overlay awaits player input) |
+| 15     | 1    | -       | reserved           | |
 | 16     | 4    | mod→py  | `heartbeat`        | uint32, incremented every Unity Update while the mod is alive (even in menus). Python uses it to detect a live game. |
 | 20     | 4    | mod→py  | `step_counter`     | uint32, incremented once per completed step (frame signalled) |
 | 24     | 1    | mod→py  | `karma`            | uint8, current karma level (0 if not in game) |
 | 25     | 1    | mod→py  | `karma_cap`        | uint8 |
 | 26     | 1    | mod→py  | `food`             | uint8, food pips |
-| 27     | 1    | -       | reserved           | |
+| 27     | 1    | mod→py  | `food_max`         | uint8, the slugcat's maximum food pips |
 | 28     | 4    | mod→py  | `player_x`         | float32, player body chunk 0 position in room coords (0 if unavailable) |
 | 32     | 4    | mod→py  | `player_y`         | float32 |
 | 36     | 4    | mod→py  | `room_index`       | int32, abstract room index (-1 if unavailable) |
 | 40     | 4    | mod→py  | `cycle_number`     | int32, save-state cycle number (-1 if unavailable) |
-| 44     | 20   | -       | reserved           | |
+| 44     | 4    | py→mod  | `action_bits`      | uint32, protocol v3 raw-key action bitfield. Bit assignments in **Action bits** below. |
+| 48     | 4    | mod→py  | `cycle_progress`   | float32, fraction of the rain cycle elapsed (0..1; >1 once rain has started; 0 if unavailable) |
+| 52     | 12   | -       | reserved           | |
 | 64     | N    | mod→py  | `frame`            | RGB24, row-major, top row first, width*height*3 bytes |
+
+## Action bits (offset 44)
+
+One bit per physical key a player can hold. Any combination may be set in the same step.
+The authoritative list lives here and in `rainworld_rl/shared_memory.py` (`KEY_*`) and
+`SharedMemoryBridge.cs` (`KEY_*`); the three must match.
+
+| Bit | Key | Notes |
+|----:|-----|-------|
+| (to be filled in by the action-space work) | | |
 
 ## Status bits (offset 3)
 
@@ -63,10 +76,12 @@ are zeroed/-1 and `IN_GAME` is clear. (The mod is expected to auto-return to the
 
 ## Commands (offset 12)
 
-Python clears `command_result` to 0, writes `command = RESET`, then polls `command_result`
+Python clears `command_result` to 0, writes a command (`RESET` or `KILL_PLAYER`), then polls `command_result`
 until nonzero (timeout ~60s). The mod performs the command on the main thread, writes
 `command_result`, then writes `command = NONE`. RESET = delete the RL save directory
 contents, start a fresh story game as the configured slugcat, wait until `READY`, then ack.
+KILL_PLAYER = kill player 0 immediately (the following step reports the `PLAYER_DEAD` edge and the
+normal respawn flow runs); ack once the kill has been applied.
 
 ## Connect handshake (Python side)
 

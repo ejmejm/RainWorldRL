@@ -30,10 +30,10 @@ Importing / registration
 ------------------------
 The repository directory is the package (``rainworld_rl``) and this module
 lives in its ``python`` subpackage, so the gym entry point is
-``rainworld_rl.python.rainworld_env:RainWorldEnv``. That requires the *parent*
+``rainworld_rl.rainworld_env:RainWorldEnv``. That requires the *parent*
 of the repository to be on ``sys.path`` (e.g. ``E:/projects`` for
 ``E:/projects/rainworld_rl``), which is also what makes
-``from rainworld_rl.python import RainWorldEnv`` work. ``gym.make("RainWorld-v0")``
+``from rainworld_rl import RainWorldEnv`` work. ``gym.make("RainWorld-v0")``
 only works after this module has been imported once (the ``gym.register``
 call is at the bottom of this file).
 """
@@ -282,4 +282,4 @@ class RainWorldEnv(gym.Env):
 # Register with Gymnasium. See the module docstring for the import-path caveat.
 _ENV_ID = "RainWorld-v0"
 if _ENV_ID not in gym.registry:
-    gym.register(id = _ENV_ID, entry_point = "rainworld_rl.python.rainworld_env:RainWorldEnv")
+    gym.register(id = _ENV_ID, entry_point = "rainworld_rl.rainworld_env:RainWorldEnv")

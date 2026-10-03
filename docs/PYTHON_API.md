@@ -4,7 +4,7 @@ Python client for the Rain World RL mod. Protocol details live in
 [PROTOCOL.md](PROTOCOL.md); this page covers day-to-day usage.
 
 Requirements: Windows, Python >= 3.11, `numpy`, `gymnasium`
-(`pip install -r python/requirements.txt`). The .NET SDK is only needed if you
+(`pip install -e .`). The .NET SDK is only needed if you
 let `launch()` build the mod.
 
 ## Importing
@@ -15,17 +15,17 @@ in its `python` subpackage, so the **parent** of the repo must be on
 
 ```python
 import sys; sys.path.insert(0, "E:/projects")      # or set PYTHONPATH
-from rainworld_rl.python import RainWorldEnv, GameNotRunningError
+from rainworld_rl import RainWorldEnv, GameNotRunningError
 ```
 
-`gym.make("RainWorld-v0")` works once `rainworld_rl.python.rainworld_env` has
+`gym.make("RainWorld-v0")` works once `rainworld_rl.rainworld_env` has
 been imported (registration happens at import time with entry point
-`rainworld_rl.python.rainworld_env:RainWorldEnv`).
+`rainworld_rl.rainworld_env:RainWorldEnv`).
 
 ## Quick start
 
 ```python
-from rainworld_rl.python import RainWorldEnv
+from rainworld_rl import RainWorldEnv
 
 env = RainWorldEnv(frame_width = 160, frame_height = 90, ticks_per_step = 4)  # cheap, no game contact
 
@@ -109,7 +109,7 @@ throw, horizontal, vertical, ticks_per_step)` directly.
 Press F10 in the game to take control: the mod runs at real time and ignores
 agent actions. While the override is set, `env.step()` **blocks** (polling at
 ~50 ms) instead of timing out, and logs one warning through the `logging`
-module (`rainworld_rl.python.shared_memory`). Press F10 again to hand control
+module (`rainworld_rl.shared_memory`). Press F10 again to hand control
 back; the pending action is then serviced and `step()` returns normally.
 `info["human_override"]` reports the state.
 
@@ -144,7 +144,7 @@ Lookup order: explicit `load_config(path)` argument > `$RAINWORLD_RL_CONFIG` >
 from the same file.
 
 ```python
-from rainworld_rl.python import load_config
+from rainworld_rl import load_config
 cfg = load_config()
 env = RainWorldEnv(config = cfg)
 ```
@@ -152,11 +152,11 @@ env = RainWorldEnv(config = cfg)
 ## Launcher CLI
 
 ```
-python -m rainworld_rl.python.launcher              # build, deploy, restart game, wait for mod
-python -m rainworld_rl.python.launcher --no-build   # just (re)start
-python -m rainworld_rl.python.launcher --no-restart # attach if running, else start
-python -m rainworld_rl.python.launcher --build-only # dotnet build + copy DLL
-python -m rainworld_rl.python.launcher --kill       # stop a running game
+python -m rainworld_rl.launcher              # build, deploy, restart game, wait for mod
+python -m rainworld_rl.launcher --no-build   # just (re)start
+python -m rainworld_rl.launcher --no-restart # attach if running, else start
+python -m rainworld_rl.launcher --build-only # dotnet build + copy DLL
+python -m rainworld_rl.launcher --kill       # stop a running game
 ```
 
 Steam must be running; the launcher starts `RainWorld.exe` directly. The DLL
@@ -166,9 +166,9 @@ assemblies locked.
 ## Smoke test
 
 ```
-python -m rainworld_rl.python.test_env            # connect to a running game, RESET, 1000 random steps
-python -m rainworld_rl.python.test_env --launch   # build + restart the game first
-python -m rainworld_rl.python.test_env --no-wipe  # attach without resetting
+python -m rainworld_rl.test_env            # connect to a running game, RESET, 1000 random steps
+python -m rainworld_rl.test_env --launch   # build + restart the game first
+python -m rainworld_rl.test_env --no-wipe  # attach without resetting
 ```
 
 Prints the `info` fields every 100 steps and a line whenever `player_dead`
@@ -186,5 +186,5 @@ mapping_factory=None)` wraps the mapping directly:
 - `read_state() -> ModState` (whole 64-byte header via one `struct.Struct` read), `set_connected(bool)` (read-modify-write of Python's bit only)
 
 `mapping_factory` lets tests inject a `bytearray`-backed fake; see
-`python/tests_unit/`. Run the game-free tests with
+`rainworld_rl/tests_unit/`. Run the game-free tests with
 `python -m pytest python/tests_unit -q`.

@@ -1,0 +1,8 @@
+numpy>=1.21.0
+gymnasium>=0.29.0
+
+[render]
+Pillow>=9.0.0
+
+[test]
+pytest>=7.0

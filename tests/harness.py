@@ -2,7 +2,7 @@
 Shared helpers for the Rain World RL test harness.
 
 Everything in here is importable WITHOUT the game and without the
-``rainworld_rl.python`` package, so unit tests can exercise it with a fake env.
+``rainworld_rl`` package, so unit tests can exercise it with a fake env.
 Constants mirror docs/PROTOCOL.md; keep them in sync with that document.
 """
 

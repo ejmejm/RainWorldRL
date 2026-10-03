@@ -3,29 +3,32 @@ using System.IO.MemoryMappedFiles;
 
 /// <summary>
 /// Manages shared memory communication between the Rain World mod and the Python RL client.
-/// Implements protocol v2 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
+/// Implements protocol v3 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
 ///
 /// Header layout (64 bytes):
 ///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
-///   1   u8   action           py->mod bitfield
+///   1   u8   action           py->mod legacy v2 bitfield (v3 uses action_bits at 44)
 ///   2   u8   ticks_per_step   py->mod (0 treated as 1)
 ///   3   u8   status           shared bitfield; each side only writes its own bits
 ///   4   u32  frame_width      py->mod
 ///   8   u32  frame_height     py->mod
-///   12  u8   command          py->mod (0 NONE, 1 RESET); mod clears when done
+///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER); mod clears when done
 ///   13  u8   command_result   mod->py (0 none, 1 OK, 2 ERROR)
-///   14  u16  reserved
+///   14  u8   game_flags       mod->py (b0 IN_SHELTER, b1 CYCLE_SURVIVED edge, b2 RAIN, b3 DIALOG_OPEN)
+///   15  u8   reserved
 ///   16  u32  heartbeat        mod->py, incremented every Unity Update
 ///   20  u32  step_counter     mod->py, incremented once per completed step
 ///   24  u8   karma
 ///   25  u8   karma_cap
 ///   26  u8   food
-///   27  u8   reserved
+///   27  u8   food_max
 ///   28  f32  player_x
 ///   32  f32  player_y
 ///   36  i32  room_index       (-1 if unavailable)
 ///   40  i32  cycle_number     (-1 if unavailable)
-///   44  20B  reserved
+///   44  u32  action_bits      py->mod v3 action bitfield (bit list in PROTOCOL.md)
+///   48  f32  cycle_progress   mod->py fraction of the cycle elapsed (0..1, >1 once rain starts)
+///   52  12B  reserved
 ///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
@@ -47,6 +50,7 @@ public class SharedMemoryBridge : IDisposable
     // Commands (offset 12) and results (offset 13)
     public const byte CMD_NONE = 0;
     public const byte CMD_RESET = 1;
+    public const byte CMD_KILL_PLAYER = 2;
     public const byte RESULT_NONE = 0;
     public const byte RESULT_OK = 1;
     public const byte RESULT_ERROR = 2;
@@ -60,15 +64,19 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_HEIGHT = 8;
     private const int OFFSET_COMMAND = 12;
     private const int OFFSET_COMMAND_RESULT = 13;
+    private const int OFFSET_GAME_FLAGS = 14;
     private const int OFFSET_HEARTBEAT = 16;
     private const int OFFSET_STEP_COUNTER = 20;
     private const int OFFSET_KARMA = 24;
     private const int OFFSET_KARMA_CAP = 25;
     private const int OFFSET_FOOD = 26;
+    private const int OFFSET_FOOD_MAX = 27;
     private const int OFFSET_PLAYER_X = 28;
     private const int OFFSET_PLAYER_Y = 32;
     private const int OFFSET_ROOM_INDEX = 36;
     private const int OFFSET_CYCLE_NUMBER = 40;
+    private const int OFFSET_ACTION_BITS = 44;
+    private const int OFFSET_CYCLE_PROGRESS = 48;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
     // Action bitfield masks
@@ -85,6 +93,12 @@ public class SharedMemoryBridge : IDisposable
     public const byte STATUS_HUMAN_OVERRIDE = 0x08; // mod
     public const byte STATUS_IN_GAME = 0x10;        // mod
     public const byte STATUS_MOD_ALIVE = 0x20;      // mod
+
+    // game_flags bits (offset 14, mod-owned)
+    public const byte GAME_FLAG_IN_SHELTER = 0x01;      // level
+    public const byte GAME_FLAG_CYCLE_SURVIVED = 0x02;  // edge: hibernation succeeded this step
+    public const byte GAME_FLAG_RAIN = 0x04;            // level
+    public const byte GAME_FLAG_DIALOG_OPEN = 0x08;     // level: text/dialog overlay awaits input
 
     /// <summary>Bits the mod is allowed to write. Everything else belongs to Python.</summary>
     public const byte MOD_OWNED_STATUS_MASK =
@@ -132,6 +146,9 @@ public class SharedMemoryBridge : IDisposable
     // ----- py -> mod inputs -----
 
     public byte ReadAction() => accessor.ReadByte(OFFSET_ACTION);
+
+    /// <summary>Reads the protocol v3 action bitfield (offset 44).</summary>
+    public uint ReadActionBits() => accessor.ReadUInt32(OFFSET_ACTION_BITS);
 
     public byte ReadTicksPerStep()
     {
@@ -216,10 +233,24 @@ public class SharedMemoryBridge : IDisposable
         accessor.Write(OFFSET_CYCLE_NUMBER, cycleNumber);
     }
 
+    /// <summary>Writes the game_flags byte (offset 14). Mod-owned; write the whole byte.</summary>
+    public void WriteGameFlags(byte flags) => accessor.Write(OFFSET_GAME_FLAGS, flags);
+
+    public byte ReadGameFlags() => accessor.ReadByte(OFFSET_GAME_FLAGS);
+
+    /// <summary>Writes the slugcat's maximum food pips (offset 27).</summary>
+    public void WriteFoodMax(int foodMax) => accessor.Write(OFFSET_FOOD_MAX, ClampByte(foodMax));
+
+    /// <summary>Writes the fraction of the rain cycle elapsed (offset 48).</summary>
+    public void WriteCycleProgress(float progress) => accessor.Write(OFFSET_CYCLE_PROGRESS, progress);
+
     /// <summary>Writes the "unavailable" values for all game-state fields.</summary>
     public void ClearGameState()
     {
         WriteGameState(0, 0, 0, 0f, 0f, -1, -1);
+        WriteGameFlags(0);
+        WriteFoodMax(0);
+        WriteCycleProgress(0f);
     }
 
     private static byte ClampByte(int v)

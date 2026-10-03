@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from rainworld_rl.python import config as cfg
+from rainworld_rl import config as cfg
 
 
 def test_defaults():
