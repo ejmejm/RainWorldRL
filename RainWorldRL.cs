@@ -10,7 +10,7 @@ using UnityEngine;
 
 /// <summary>
 /// Rain World RL - Turns Rain World into a reinforcement learning environment.
-/// Communicates with Python via shared memory (protocol v2, docs/PROTOCOL.md).
+/// Communicates with Python via shared memory (protocol v3, docs/PROTOCOL.md).
 ///
 /// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
 /// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
@@ -264,6 +264,24 @@ public class RainWorldRL : BaseUnityPlugin
                 sharedMemory.WriteCommandResult(SharedMemoryBridge.RESULT_ERROR);
                 sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
             }
+        }
+        else if (command == SharedMemoryBridge.CMD_KILL_PLAYER)
+        {
+            // Debug/testing aid: kill player 0 synchronously and ack as soon as it is dead.
+            // The respawn is NOT awaited - Python observes it through subsequent steps.
+            bool killed = false;
+            try
+            {
+                killed = gameFlow.KillPlayer(rainWorld);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"KILL_PLAYER failed: {ex}");
+            }
+            if (!killed)
+                Logger.LogWarning("KILL_PLAYER command could not be applied; reporting ERROR");
+            sharedMemory.WriteCommandResult(killed ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
         }
         else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
         {
