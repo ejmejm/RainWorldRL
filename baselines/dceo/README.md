@@ -40,8 +40,8 @@ replay buffer; by default one gradient step of each every 4 env steps
    phi (`--d 8` outputs, symmetric-log transformed) and an inverse-dynamics head chi.
    * ALLO on pairs `(x_t, x_{t+Delta})`, `P(Delta) ∝ 0.9^(Delta-1)` (`--gamma_rep`):
      `sum_i E[(u_i(x)-u_i(x'))^2] + sum_{j>=k} beta_jk (<u_j,[[u_k]]> - delta_jk) + b sum_{j>=k} (...)_1 (...)_2`
-     with stop-gradients and two independent constraint batches, exactly as the
-     reference; barrier `b = 0.5` **fixed** (Wayfarer; the reference grows it),
+     with stop-gradients and two independent constraint batches as in the
+     reference (by default the two halves of the pair starts, see deviations); barrier `b = 0.5` **fixed** (Wayfarer; the reference grows it),
      duals start at `-2.0` on the diagonal, updated by plain gradient ascent
      (`duals += 3e-5 * tril(errors)`, clipped to +/-100) - 10x slower than the
      encoder's Adam step size (3e-4), the ALLO reference's ratio.
@@ -49,8 +49,9 @@ replay buffer; by default one gradient step of each every 4 env steps
      `psi(x_t) ⊕ psi(x_{t+Delta})`. With `MultiBinary(9)` this is 9 sigmoid
      cross-entropies summed (= `-log q(a_t)` under a factorised model), weight 1.0.
      Only the shared encoder receives both gradients.
-   * Pairs follow **Wayfarer / ALLO (geometric Delta-step pairs)**, not DCEO's
-     consecutive pairs (`--gamma_rep 0` gives Delta = 1).
+   * Pairs follow **Wayfarer / ALLO (geometric Delta-step pairs, mean Delta ~ 10)**, not
+     DCEO's: the DCEO paper uses consecutive pairs and its Atari code pairs `x_t` with the
+     n-step next state `x_{t+3}` (`--gamma_rep 0` gives Delta = 1).
 2. **Skill network** (Wayfarer Sec. 3.2). One encoder, `K = 2(d-1) = 14` dueling
    Q-heads over the 512 joint actions (`--option_directions positive` gives DCEO's
    one-directional `K = d-1`). Option `2(i-1)` / `2(i-1)+1` gets
@@ -192,12 +193,37 @@ move; eigenfunction *directions* converge long before the scale (see
 `test_dceo_allo.py`). Inverse-dynamics accuracy above chance (`inv_acc_key` > the
 majority-class rate) means the encoder is picking up agent-controlled features.
 
-## Throughput (this machine: 16-core CPU, no GPU)
+## Throughput and smoke-test numbers (this machine: 16-core CPU, no GPU)
 
 Per update (main + skill + representation, default sizes): main ~25 ms, skill
-~45 ms, representation ~45 ms (rep_batch 64; ~120 ms at 128), ~95 ms with the
-three in parallel threads. With async updates the update overlaps the 4 env steps
-it follows; see the live smoke numbers in the run notes of the PR / final report.
+~45 ms, representation ~45 ms (rep_batch 64; ~120 ms at 128); ~95 ms with the three
+in parallel threads (~120 ms sequential).
+
+* `--fake`, 5,000 steps (`--min_replay 1000`): 38 env steps/s overall with learning,
+  update compute 104 ms (overlapped with acting), 1,000 updates in 104 s. Fake frames
+  are i.i.d. noise, so the representation numbers there mean nothing (inverse dynamics
+  stays at chance, as it should).
+* Live smoke, 180 s of interaction (`--launch --kill_game --game_lock ... --seconds 180
+  --min_replay 2000 --epsilon_decay_steps 4000 --target_update_period 2000`): 7,111 env
+  steps, 1,278 updates. ~95 env steps/s before learning starts, ~32-33 steps/s once
+  updates run (98 ms per update in the background; the env + acting side slows from
+  ~10 to ~30 ms/step because the update threads, the acting forward pass and the game
+  share the CPU; the learner was never the one waited on). Rooms discovered 1, deaths 0
+  (3 minutes, mostly epsilon ~ 1). Option share of steps 0.97 while epsilon = 1, 0.2-0.4
+  at the 0.05 floor; mean option duration ~10 steps (P_term 0.1). Representation after
+  1,278 updates: inverse-dynamics per-key accuracy 0.62 -> 0.73 (exact 9-key match
+  0.19; chance ~0.5 / 0.002), graph norms already ordered (`u_0` 0.002, `u_1` 0.05,
+  `u_2` 0.11, `u_3` 0.30, `u_4..7` 0.34-0.51), squared norms inflated to ~2.3-2.9
+  and `eig_est_*` still ~0.96-0.99: the slow-dual transient described above.
+  Per-option intrinsic reward |r| ~0.17 per 3-step window.
+* On a synthetic pixel corridor (random walk of a square on a 20-cell strip with
+  pixel noise; scratch check, not a unit test) the learned `u_1..u_3` correlate
+  0.97-0.999 with the analytic eigenvectors after 500 updates. After 4,000 updates the
+  squared norms are ~1.6-2.8 with `--dual_lr 3e-5` (default) and ~1.2-1.6 with
+  `--dual_lr 3e-4` (eigenvector correlations identical), so the faster duals of
+  Wayfarer's Table 1 shorten the scale transient without hurting the directions.
+
+On a GPU, raise `--updates_per_step` and `--rep_batch` (Wayfarer: 512).
 
 ## Future work
 
