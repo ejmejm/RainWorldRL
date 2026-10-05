@@ -236,11 +236,11 @@ def sleep_seq(awake_steps: int, food_before: int, cycle: int = 0, survived: bool
     return seq
 
 
-def test_sleep_scales_with_tiredness_after_ten_percent_of_a_cycle_pays_ten_percent():
+def test_sleep_scales_with_tiredness_after_ten_percent_of_a_cycle_pays_one_percent():
     term = Sleep(weight = 1.0, full_belly_per_pip = 0.25, nominal_cycle_steps = 1000)
     rewards = run(term, sleep_seq(awake_steps = 99, food_before = 4))     # 99 steps + the edge step = 100 awake
-    assert sum(rewards) == pytest.approx(0.10)
-    assert rewards[-3] == pytest.approx(0.10) and rewards[-1] == 0.0 and rewards[-2] == 0.0
+    assert sum(rewards) == pytest.approx(0.10 ** 2)   # convex sleep pressure: 10% awake -> 1%
+    assert rewards[-3] == pytest.approx(0.10 ** 2) and rewards[-1] == 0.0 and rewards[-2] == 0.0
 
 
 def test_sleep_tiredness_is_capped_at_one_full_cycle():
@@ -288,7 +288,7 @@ def test_sleep_resets_steps_awake_on_env_reset_and_counts_non_ready_steps():
     assert term.steps_awake == 0
     for _ in range(5):
         term(not_ready(), not_ready())                                     # loading screens still take time
-    assert term.tiredness == pytest.approx(0.5)
+    assert term.tiredness == pytest.approx(0.5 ** 2)
     assert Sleep().nominal_cycle_steps == 24000
     with pytest.raises(ValueError):
         Sleep(nominal_cycle_steps = 0)
@@ -605,7 +605,7 @@ def test_scenario_forager_beats_camper_over_the_same_number_of_steps(novelty: bo
 def test_scenario_camper_sleep_reward_is_tiny_and_food_reward_collapses():
     camp = total_reward(drive_terms(False, ticks_per_step = TPS), camper(3 * CYCLE))
     sleeps = 3 * CYCLE // 100
-    assert camp["Sleep"] == pytest.approx(sleeps * 100 / CYCLE, rel = 0.05)   # ~1.7 % tiredness per sleep
+    assert camp["Sleep"] == pytest.approx(sleeps * (100 / CYCLE) ** 2, rel = 0.05)   # (1.7 %)^2 per sleep
     # first pseudo-cycle at the hive: 0.3 * (1 + .5 + .25 + .125); afterwards the room is nearly exhausted
     assert camp["Food"] < 0.3 * 1.875 + 0.05 * (sleeps - 1)
 
@@ -638,13 +638,13 @@ def glutton_camper(total_steps: int, camp_steps: int = 150) -> Iterator[Dict[str
             produced += 1
 
 
-@pytest.mark.xfail(strict = False, reason = "known gap in the agreed design: the full-belly bonus is not scaled by "
-                   "tiredness, so a camper that eats 7 pips per quick cycle collects 0.25 * 3 per sleep")
 def test_scenario_glutton_camper_report():
+    """A camper eating 7 pips per quick cycle must not farm the full-belly bonus:
+    the whole sleep reward (surplus included) scales with tiredness."""
     steps = 3 * CYCLE
     glutton = total_reward(drive_terms(False, ticks_per_step = TPS), glutton_camper(steps))
     forage = total_reward(drive_terms(False, ticks_per_step = TPS), forager(steps))
     print(f"\n[scenario glutton, novelty=False] {steps} steps")
     print(f"  glutton camper (7 pips, sleep at once, {steps // 150} sleeps): {glutton}")
     print(f"  forager: {forage}")
-    assert forage["TOTAL"] > glutton["TOTAL"]
+    assert forage["TOTAL"] > 1.5 * glutton["TOTAL"]
