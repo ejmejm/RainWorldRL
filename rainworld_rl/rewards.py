@@ -264,9 +264,10 @@ class Sleep(RewardTerm):
 
     On the ``cycle_survived`` edge::
 
-        weight * tiredness + full_belly_per_pip * max(0, food_before_sleep - food_to_hibernate)
+        tiredness * (weight + full_belly_per_pip * max(0, food_before_sleep - food_to_hibernate))
 
-    where ``tiredness = min(1, steps_awake / nominal_cycle_steps)``,
+    where ``tiredness = min(1, steps_awake / nominal_cycle_steps) ** tiredness_power``
+    (default power 2: convex sleep pressure, see REWARDS.md),
     ``steps_awake`` counts real env steps since the last sleep (or since
     ``reset()``), and ``food_before_sleep`` is the last ``food`` value seen
     before the edge (``prev_info["food"]`` - the save already subtracted the
@@ -283,10 +284,14 @@ class Sleep(RewardTerm):
         weight: float = 1.0,
         full_belly_per_pip: float = 0.25,
         nominal_cycle_steps: Optional[int] = None,
+        tiredness_power: float = 2.0,
         name: Optional[str] = None,
     ):
         super().__init__(weight, name)
         self.full_belly_per_pip = float(full_belly_per_pip)
+        if tiredness_power <= 0:
+            raise ValueError("tiredness_power must be > 0")
+        self.tiredness_power = float(tiredness_power)
         self.nominal_cycle_steps = int(
             nominal_cycle_steps if nominal_cycle_steps is not None else _nominal_cycle_steps(1)
         )
@@ -316,7 +321,10 @@ class Sleep(RewardTerm):
 
     @property
     def tiredness(self) -> float:
-        return min(1.0, self.steps_awake / self.nominal_cycle_steps)
+        # Convex sleep pressure: with a linear ramp the lifetime sleep reward is the same
+        # whether you sleep 3 times or 120 times (it accrues per step awake). Squaring it
+        # makes early sleeps pay disproportionately little, so quick cycles lose.
+        return min(1.0, self.steps_awake / self.nominal_cycle_steps) ** self.tiredness_power
 
     def __call__(self, prev_info: Info, info: Info) -> float:
         self.steps_awake += 1
@@ -327,7 +335,9 @@ class Sleep(RewardTerm):
             # Fed sleep. food/threshold come from the last ready info before the edge
             # (normally prev_info; the edge itself may land on a non-ready frame).
             surplus = max(0, self._last_food - self._last_threshold)
-            reward = self.weight * self.tiredness + self.full_belly_per_pip * surplus
+            # The whole sleep reward scales with tiredness, surplus bonus included; otherwise a
+            # camper eating 7 pips per quick cycle farms the full-belly bonus (see REWARDS.md).
+            reward = self.tiredness * (self.weight + self.full_belly_per_pip * surplus)
             slept = True
 
         if _ready(info):
@@ -521,6 +531,7 @@ def drive_terms(
     recovery_steps: Optional[int] = None,
     sleep: float = 1.0,
     full_belly_per_pip: float = 0.25,
+    tiredness_power: float = 2.0,
     death: float = -3.0,
     malnourished: float = -0.0003,
 ) -> List[RewardTerm]:
@@ -537,7 +548,7 @@ def drive_terms(
     terms += [
         Food(food_below, food_above, satiety_decay,
              recovery_steps if recovery_steps is not None else cycle_steps),
-        Sleep(sleep, full_belly_per_pip, cycle_steps),
+        Sleep(sleep, full_belly_per_pip, cycle_steps, tiredness_power),
         Death(death),
         Malnourished(malnourished),
     ]

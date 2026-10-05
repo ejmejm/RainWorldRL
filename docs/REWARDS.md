@@ -93,12 +93,14 @@ mod reads 0 while not READY) never give negative reward, and deltas across
 On the `cycle_survived` edge the reward is
 
 ```
-weight * tiredness + full_belly_per_pip * max(0, food_before_sleep - food_to_hibernate)
+tiredness * (weight + full_belly_per_pip * max(0, food_before_sleep - food_to_hibernate))
+tiredness = min(1, steps_awake / nominal_cycle_steps) ** tiredness_power    # default power 2
 tiredness = min(1, steps_awake / nominal_cycle_steps)
 ```
 
 `steps_awake` counts real env steps since the last sleep (or since `reset()`),
-so a sleep after 10 % of a nominal cycle is worth 10 % of `weight`, and a full
+so a sleep after 10 % of a nominal cycle is worth 1 % of `weight` (the ramp is
+squared, see below), and a full
 sleep (1.0) is only collectable by staying out a whole cycle - at which point
 the food you need is not where you slept. `food_before_sleep` is
 `prev_info["food"]` (the save has already subtracted the hibernation cost by
@@ -107,13 +109,19 @@ food_to_hibernate` (3 pips = 0.75 for Survivor). A starving sleep
 (`cycle_number` increments without `cycle_survived`, or `malnourished` turns
 True) earns nothing but still resets `steps_awake`.
 
-**Caveat (known gap, deliberately left as specified):** the surplus bonus is
-not scaled by tiredness. A "glutton camper" that manages to eat *7* pips per
-quick pseudo-cycle (hive + fruit that regrows on the cycle counter) would
-collect 0.75 per sleep and beat the forager. The reward unit tests print this
-case (`test_scenario_glutton_camper_report`, an informational xfail). The
-one-line fix, if it shows up in practice, is to multiply the surplus bonus by
-`tiredness` as well (or pass `full_belly_per_pip = 0`).
+**Why the surplus bonus is inside the tiredness factor:** if it were added
+unscaled, a "glutton camper" that eats *7* pips per quick pseudo-cycle (hive +
+fruit that regrows on the cycle counter) would collect 0.75 per sleep and beat
+the forager by a wide margin (synthetic run: 67 vs 10). Scaling the whole sleep
+reward by tiredness closes that: a sleep after 2.5% of a cycle pays 2.5% of
+everything. `test_scenario_glutton_camper_report` asserts the forager wins.
+
+**Why tiredness is squared:** with a linear ramp the lifetime sleep reward is
+rate-neutral - it accrues per step awake, so 120 quick sleeps earn as much as
+3 full ones and the forager only won through food (9.7 vs 8.5). A convex ramp
+(`tiredness_power = 2`) makes a sleep after 2.5% of a cycle worth 0.06% of a
+full one, which is what sleep pressure feels like and what makes quick cycles
+strictly lose.
 
 ### The other terms
 
