@@ -5,6 +5,7 @@ This is a project to turn Rain World into a reinforcement learning environment.
 A BepInEx mod drives the game step-by-step over shared memory; a Gymnasium env in `rainworld_rl/`
 talks to it. See `docs/PYTHON_API.md` for usage, `docs/PROTOCOL.md` for the wire format,
 and `tests/README.md` for the end-to-end test harness.
+Baseline agents (PPO, random) live in `baselines/`; see `baselines/README.md`.
 
 ## Quick start
 

@@ -6,3 +6,5 @@ obj/
 .pytest_cache/
 rainworld_rl.toml
 *.egg-info/
+mlruns/
+baselines/**/checkpoints/
