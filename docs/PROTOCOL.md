@@ -34,7 +34,8 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 48     | 4    | mod→py  | `cycle_progress`   | float32, `RainCycle.timer / cycleLength` (0..1; >1 once the rain is falling, the timer keeps counting; 0 if unavailable). Note: in the first cycle of a fresh save the overseer tutorial pins `timer` to 2000 (`OverseerTutorialBehavior.pauseRain`) until the player leaves the start rooms (x > 600 in `SU_A43`, or `SU_A22`), then fast-forwards it. |
 | 52     | 1    | mod→py  | `food_to_hibernate`| uint8, food pips needed to hibernate this cycle (`SlugcatStats.foodToHibernate`; Survivor 4; equals `food_max` while malnourished; 0 if unavailable) |
 | 53     | 1    | mod→py  | `malnourished`     | uint8 0/1 (level), `SaveState.malnourished`: the previous sleep was a starving one, so this cycle needs `food_max` pips to sleep |
-| 54     | 10   | -       | reserved           | |
+| 54     | 4    | mod→py  | `region`           | ASCII region acronym of the active world (`World.region.name`, e.g. `SU`, `HI`), NUL-padded to 4 bytes; all NUL (empty string) when no world is loaded. Combine with `room_index` for a save-wide room key: room indices are only unique within a region. |
+| 58     | 6    | -       | reserved           | |
 | 64     | N    | mod→py  | `frame`            | RGB24, row-major, top row first, width*height*3 bytes |
 
 ## Action bits (offset 44)

@@ -160,6 +160,7 @@ class FakeEnv:
             "cycle_survived": False,
             "rain": False,
             "dialog_open": False,
+            "region": "SU",
         }
 
 

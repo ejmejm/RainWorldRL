@@ -52,7 +52,7 @@ def test_header_struct_matches_protocol_offsets():
     assert struct.unpack_from("<i", buf, 40)[0] == 12
     assert struct.unpack_from("<I", buf, 44)[0] == 0x1A5                   # action_bits
     assert struct.unpack_from("<f", buf, 48)[0] == 0.5
-    assert buf[52:64] == bytes(12)
+    assert buf[52:64] == bytes(12)                                           # region "" -> all NUL, reserved 58..63
 
 
 def test_header_pack_unpack_round_trip():
@@ -86,7 +86,7 @@ def test_to_info_contains_expected_fields():
         "player_pos": (3.0, 4.0), "room_index": 5, "cycle_number": 6,
         "step_counter": 7, "in_game": True, "ready": True, "human_override": False,
         "in_shelter": True, "cycle_survived": True, "rain": False, "dialog_open": False,
-        "cycle_progress": 0.25, "food_to_hibernate": 4, "malnourished": True,
+        "cycle_progress": 0.25, "food_to_hibernate": 4, "malnourished": True, "region": "",
     }
     assert info["malnourished"] is True
 
@@ -98,11 +98,26 @@ def test_v3_game_state_fields_round_trip():
     assert raw[sm.OFFSET_FOOD_MAX] == 9
     assert raw[sm.OFFSET_FOOD_TO_HIBERNATE] == 6
     assert raw[sm.OFFSET_MALNOURISHED] == 1
-    assert raw[54:64] == bytes(10)                      # reserved tail untouched
+    assert raw[54:64] == bytes(10)                      # region "" and reserved tail are all NUL
     again = ModState.unpack(raw)
     assert again == state
     assert again.rain and again.dialog_open and not again.in_shelter and not again.cycle_survived
     assert again.cycle_progress == 1.25
+
+
+def test_region_round_trip_is_ascii_nul_padded_and_stripped():
+    raw = ModState(region = "SU").pack()
+    assert raw[sm.OFFSET_REGION:sm.OFFSET_REGION + sm.REGION_SIZE] == b"SU\0\0"
+    assert raw[58:64] == bytes(6)                                           # reserved tail untouched
+    assert ModState.unpack(raw).region == "SU"
+    assert ModState.unpack(raw).to_info()["region"] == "SU"
+    # unavailable -> empty string; over-long names are truncated to the field size
+    assert ModState.unpack(ModState().pack()).region == ""
+    assert ModState.unpack(ModState(region = "TOOLONG").pack()).region == "TOOL"
+    # a buffer with garbage after the first NUL still decodes to the acronym
+    buf = bytearray(ModState(region = "HI").pack())
+    buf[sm.OFFSET_REGION + 3] = ord("x")
+    assert ModState.unpack(bytes(buf)).region == "HI"
 
 
 def test_fake_mapping_writes_v3_fields():
@@ -115,6 +130,7 @@ def test_fake_mapping_writes_v3_fields():
     info = mapping.header().to_info()
     assert (info["food_max"], info["food_to_hibernate"], info["malnourished"]) == (5, 3, True)
     assert info["cycle_progress"] == 0.5
+    assert info["region"] == "SU"
     assert info["in_shelter"] and info["cycle_survived"] and not info["rain"]
     # the edge bit is one-shot
     mapping.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_ACTION_READY,)))
@@ -181,7 +197,38 @@ def test_connect_raises_when_mod_alive_bit_set_but_heartbeat_static():
     mapping.set_mod_bit(sm.STATUS_MOD_ALIVE, True)
     client = make_client(mapping)
     with pytest.raises(sm.GameNotRunningError, match = "did not advance"):
-        client.connect(liveness_timeout = 0.1)
+        client.connect(liveness_timeout = 0.1, alive_grace = 0.3)
+    # without an explicit grace the client default (15 s) applies
+    assert sm.SharedMemoryClient.alive_stall_grace == 15.0
+
+
+def test_connect_tolerates_stalled_heartbeat_while_mod_alive():
+    """Right after launch MOD_ALIVE is set but the heartbeat stalls during the game's synchronous
+    initial load; connect() must wait through that instead of reporting 'not running'."""
+    mapping = FakeMapping(alive = False)
+    mapping.set_mod_bit(sm.STATUS_MOD_ALIVE, True)
+    client = make_client(mapping)
+
+    def resume():
+        time.sleep(0.4)
+        mapping.alive = True
+
+    t = threading.Thread(target = resume, daemon = True)
+    t0 = time.monotonic()
+    t.start()
+    client.connect(liveness_timeout = 0.1, alive_grace = 3.0)   # would fail at 0.1 s without the grace
+    assert client.is_connected()
+    assert 0.3 <= time.monotonic() - t0 < 3.0
+    t.join()
+
+
+def test_wait_for_alive_grace_does_not_apply_when_mod_not_alive():
+    mapping = FakeMapping(alive = False)
+    client = make_client(mapping)
+    t0 = time.monotonic()
+    with pytest.raises(sm.GameNotRunningError, match = "MOD_ALIVE clear"):
+        client.wait_for_alive(timeout = 0.1, alive_grace = 5.0)
+    assert time.monotonic() - t0 < 1.0
 
 
 def test_connect_ready_timeout():
@@ -458,8 +505,9 @@ def test_env_reset_sends_reset_and_returns_frame_and_info():
         "player_dead", "karma", "karma_cap", "food", "player_pos", "room_index",
         "cycle_number", "step_counter", "in_game", "ready", "human_override",
         "food_max", "in_shelter", "cycle_survived", "rain", "dialog_open", "cycle_progress",
-        "food_to_hibernate", "malnourished",
+        "food_to_hibernate", "malnourished", "region",
     }
+    assert info["region"] == "SU"
     assert env.connected
 
 

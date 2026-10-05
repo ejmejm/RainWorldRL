@@ -242,7 +242,8 @@ def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float]
                     f"The RainWorldRL mod did not come alive within {timeout:.0f}s of starting the game.",
                 )
             try:
-                client.wait_for_alive(timeout = min(1.0, max(0.1, remaining)))
+                # alive_grace = 0: this loop does its own retrying and process check.
+                client.wait_for_alive(timeout = min(1.0, max(0.1, remaining)), alive_grace = 0.0)
                 logger.info("Mod is alive")
                 return
             except GameNotRunningError:

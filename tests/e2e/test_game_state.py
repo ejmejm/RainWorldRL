@@ -1,4 +1,4 @@
-"""Protocol v3 game-state info fields: food meter, cycle_progress, rain, in_shelter, malnourished, cycle_survived."""
+"""Protocol v3 game-state info fields: food meter, cycle_progress, rain, in_shelter, malnourished, cycle_survived, region."""
 
 from __future__ import annotations
 
@@ -32,6 +32,23 @@ def test_fresh_save_game_state_fields(fresh_env):
     assert not any(infos(results, "malnourished"))
     print(f"[game_state] in_shelter at reset = {first['in_shelter']}, room {first['room_index']}, "
           f"food meter {first['food']}/{first['food_to_hibernate']}/{first['food_max']}")
+
+
+def test_region_is_su_on_a_fresh_survivor_save_and_room_key_is_stable(fresh_env):
+    """
+    A fresh Survivor save starts in Outskirts: info["region"] == "SU" (World.region.name, header offset 54).
+    (region, room_index) must be the same on every READY step while the slugcat stays in the start shelter.
+    """
+    results = step_n(fresh_env, 30)
+    ready = [info for _obs, info in results if info["ready"]]
+    assert len(ready) >= 25, f"too few READY steps: {len(ready)}"
+    for info in ready:
+        assert isinstance(info["region"], str) and info["region"] == info["region"].strip("\0 ")
+        assert info["region"] == "SU", info
+        assert info["room_index"] >= 0, info
+    keys = {(info["region"], info["room_index"]) for info in ready}
+    assert len(keys) == 1, f"(region, room_index) changed while standing still: {keys}"
+    print(f"[game_state] region/room key at reset = {keys.pop()}")
 
 
 @pytest.mark.xfail(strict=False, reason="assumes the mod's Slugcat config is the default (White / Survivor)")
