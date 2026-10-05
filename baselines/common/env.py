@@ -245,6 +245,7 @@ def make_env(
     *,
     fake: bool = False,
     seed: Optional[int] = None,
+    novelty: bool = True,
     **env_kwargs: Any,
 ) -> gym.Env:
     """
@@ -252,7 +253,9 @@ def make_env(
 
     ``RainWorldEnv`` (or ``FakeRainWorldEnv`` when ``fake``) -> default reward
     wrapper (``reward_terms`` in info) -> optional ``GrayscaleObs`` ->
-    ``FrameStack``. With ``launch=True`` the real game is (re)started
+    ``FrameStack``. ``novelty=False`` drops the NewRoom term from the default
+    reward (use it when evaluating intrinsic-motivation methods so they are not
+    graded on a hand-written novelty bonus). With ``launch=True`` the real game is (re)started
     (``build=False``) and connected before returning; see ``attach``.
     """
     if fake:
@@ -261,7 +264,7 @@ def make_env(
         from rainworld_rl import RainWorldEnv
         base = RainWorldEnv(frame_width, frame_height, ticks_per_step, **env_kwargs)
 
-    env: gym.Env = make_default_reward_env(base)
+    env: gym.Env = make_default_reward_env(base, novelty = novelty)
     if grayscale:
         env = GrayscaleObs(env)
     env = FrameStack(env, frame_stack)
