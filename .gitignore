@@ -8,3 +8,4 @@ rainworld_rl.toml
 *.egg-info/
 mlruns/
 baselines/**/checkpoints/
+baselines/runs/
