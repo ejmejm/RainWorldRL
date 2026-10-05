@@ -1,6 +1,7 @@
 # Baselines
 
-Reference agents for the Rain World RL environment, starting with PPO. They
+Reference agents for the Rain World RL environment: PPO, plus the exploration
+methods chosen in `docs/EXPLORATION_METHODS.md` (PPO + RND, DCEO). They
 exist to (a) prove the env is trainable end to end and (b) give every later
 exploration / intrinsic-motivation method a number to beat on the same
 metrics. Stack: JAX (CPU) + Equinox + Optax + MLflow + tqdm.
@@ -15,6 +16,8 @@ baselines/
   ppo/play.py           run a checkpoint, greedy or sampled, print the same metrics
   ppo/checkpoints/      <run_id>/model_<step>.eqx + latest.eqx + model_config.json (gitignored)
   random_agent.py       uniform random keys through the same env + metrics
+  ppo_rnd/              PPO + Random Network Distillation (Burda et al. 2019; port of CleanRL ppo_rnd_envpool) - see ppo_rnd/README.md
+  dceo/                 Deep Covering Eigenoptions (Klissarov & Machado 2023) + Wayfarer representation (ALLO + inverse dynamics) - see dceo/README.md
   tests/                game-free pytest suite (uses FakeRainWorldEnv)
 ```
 
