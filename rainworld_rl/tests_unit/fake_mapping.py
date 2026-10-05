@@ -46,6 +46,7 @@ class FakeMapping(bytearray):
             # protocol v3 game-state fields
             food_max = 7, food_to_hibernate = 4, malnourished = 0, cycle_progress = 0.0,
             game_flags = 0,                      # level bits (GAME_FLAG_IN_SHELTER, ...)
+            region = "SU",                       # region acronym, NUL-padded on the wire
         )
         self.next_step_dead = False
         self.next_step_game_flags = 0            # one-shot edge bits OR-ed into the next step only
@@ -83,6 +84,7 @@ class FakeMapping(bytearray):
         self.put(sm.OFFSET_KARMA, bytes((f["karma"], f["karma_cap"], f["food"], f["food_max"])))
         self.put(sm.OFFSET_PLAYER_X, struct.pack("<ffii", f["player_x"], f["player_y"], f["room_index"], f["cycle_number"]))
         self.put(sm.OFFSET_CYCLE_PROGRESS, struct.pack("<fBB", f["cycle_progress"], f["food_to_hibernate"], int(bool(f["malnourished"]))))
+        self.put(sm.OFFSET_REGION, struct.pack("<4s", f["region"].encode("ascii")))
         flags = f["game_flags"] if game_flags is None else game_flags
         self.put(sm.OFFSET_GAME_FLAGS, bytes((flags & 0xFF,)))
         self.set_mod_bit(sm.STATUS_PLAYER_DEAD, dead)

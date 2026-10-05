@@ -32,7 +32,8 @@ Header layout (all little-endian)::
     48     4    mod->py cycle_progress  float32, RainCycle timer / cycleLength (>1 once the rain falls)
     52     1    mod->py food_to_hibernate uint8, pips needed to sleep this cycle (== food_max while malnourished)
     53     1    mod->py malnourished    uint8 0/1, the previous sleep was a starving one
-    54     10   -       reserved
+    54     4    mod->py region          ASCII region acronym (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
+    58     6    -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
 
 Actions are *raw key presses*: ``action_bits`` has one bit per key a player
@@ -106,6 +107,8 @@ OFFSET_ACTION_BITS = 44       # py->mod uint32, protocol v3 action bitfield (see
 OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FOOD_TO_HIBERNATE = 52 # mod->py uint8
 OFFSET_MALNOURISHED = 53      # mod->py uint8 (0/1)
+OFFSET_REGION = 54            # mod->py 4 bytes ASCII, NUL-padded (region acronym, "" if unavailable)
+REGION_SIZE = 4
 OFFSET_FRAME_DATA = HEADER_SIZE
 
 # action_bits (offset 44): one bit per player key. Must match SharedMemoryBridge.cs KEY_*
@@ -187,11 +190,23 @@ HEADER_STRUCT = struct.Struct(
     "f"    # cycle_progress
     "B"    # food_to_hibernate
     "B"    # malnourished
-    "10x"  # reserved
+    "4s"   # region (ASCII, NUL-padded)
+    "6x"   # reserved
 )
 assert HEADER_STRUCT.size == HEADER_SIZE, HEADER_STRUCT.size
 
 _UINT32 = struct.Struct("<I")
+
+
+def _encode_region(region: str) -> bytes:
+    """ASCII, truncated to ``REGION_SIZE`` and NUL-padded (the mod's on-the-wire form)."""
+    raw = (region or "").encode("ascii", errors = "replace")[:REGION_SIZE]
+    return raw.ljust(REGION_SIZE, b"\0")
+
+
+def _decode_region(raw: bytes) -> str:
+    """Inverse of ``_encode_region``: strip NUL padding, decode ASCII."""
+    return bytes(raw).split(b"\0", 1)[0].decode("ascii", errors = "replace")
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +272,7 @@ class ModState:
     cycle_progress: float = 0.0
     food_to_hibernate: int = 0
     malnourished: int = 0  # 0/1
+    region: str = ""       # region acronym ("SU", "HI", ...), "" if unavailable
 
     # -- status bits -------------------------------------------------------
 
@@ -331,12 +347,14 @@ class ModState:
             float(self.cycle_progress),
             self.food_to_hibernate & 0xFF,
             int(bool(self.malnourished)),
+            _encode_region(self.region),
         )
 
     @classmethod
     def unpack(cls, data: bytes) -> "ModState":
         """Parse a 64-byte header buffer."""
-        fields = HEADER_STRUCT.unpack(data[:HEADER_SIZE])
+        fields = list(HEADER_STRUCT.unpack(data[:HEADER_SIZE]))
+        fields[-1] = _decode_region(fields[-1])
         return cls(*fields)
 
     def to_info(self) -> Dict[str, Any]:
@@ -361,6 +379,7 @@ class ModState:
             "cycle_progress": self.cycle_progress,
             "food_to_hibernate": self.food_to_hibernate,
             "malnourished": bool(self.malnourished),
+            "region": self.region,
         }
 
 
@@ -540,26 +559,56 @@ class SharedMemoryClient:
         if not self.is_connected():
             raise NotConnectedError("Not connected to shared memory; call connect() first")
 
-    def wait_for_alive(self, timeout: float = 2.0, poll_interval: float = 0.01) -> ModState:
+    # While MOD_ALIVE is set the heartbeat may legitimately stall for several seconds:
+    # right after launch the game's initial load runs synchronously on the main thread
+    # (no Unity Update, so no heartbeat) although the mod's Awake has already run.
+    alive_stall_grace: float = 15.0
+
+    def wait_for_alive(
+        self,
+        timeout: float = 2.0,
+        poll_interval: float = 0.01,
+        alive_grace: Optional[float] = None,
+    ) -> ModState:
         """
         Open the mapping (without setting CONNECTED) and wait until the mod's
         heartbeat advances.
 
+        ``timeout`` is how long a static heartbeat is tolerated when ``MOD_ALIVE``
+        is clear (nothing is running). When ``MOD_ALIVE`` is set the mod has
+        started but may be inside the game's synchronous initial load, so the
+        wait is extended to ``alive_grace`` seconds (default
+        ``alive_stall_grace``, 15 s) before giving up.
+
         Returns the header snapshot that showed a live heartbeat.
 
         Raises:
-            GameNotRunningError: if the heartbeat stayed static for ``timeout``.
+            GameNotRunningError: if the heartbeat stayed static for the whole wait.
         """
+        if alive_grace is None:
+            alive_grace = self.alive_stall_grace
         self._open()
         first = self.read_state()
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        deadline = start + timeout
+        extended = False
         while True:
             time.sleep(poll_interval)
             state = self.read_state()
             if state.heartbeat != first.heartbeat:
                 return state
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            if now >= deadline:
+                if not extended and state.mod_alive and alive_grace > timeout:
+                    deadline = start + alive_grace
+                    extended = True
+                    logger.info(
+                        "RainWorldRL mod is alive but its heartbeat is stalled (initial load?); "
+                        "waiting up to %.0fs", alive_grace,
+                    )
+                    continue
                 break
+        first = state  # judge on the latest snapshot: MOD_ALIVE may have risen during the wait
 
         if not first.mod_alive:
             raise GameNotRunningError(
@@ -568,7 +617,7 @@ class SharedMemoryClient:
             )
         raise GameNotRunningError(
             f"The RainWorldRL mod reports MOD_ALIVE but its heartbeat did not advance in "
-            f"{timeout:.1f}s; the game is hung or the mapping is stale."
+            f"{max(timeout, alive_grace if extended else 0.0):.1f}s; the game is hung or the mapping is stale."
         )
 
     def connect(
@@ -576,11 +625,13 @@ class SharedMemoryClient:
         wait_ready: bool = True,
         ready_timeout: float = 60.0,
         liveness_timeout: float = 2.0,
+        alive_grace: Optional[float] = None,
     ) -> ModState:
         """
         Attach to a running game.
 
-        1. Open the mapping and confirm the mod is alive (heartbeat advances).
+        1. Open the mapping and confirm the mod is alive (heartbeat advances;
+           see ``wait_for_alive`` for the ``MOD_ALIVE`` stall grace).
         2. Write the requested frame dimensions and raise ``CONNECTED``.
         3. Optionally wait for ``READY``.
 
@@ -592,7 +643,7 @@ class SharedMemoryClient:
             ReadyTimeoutError: ``wait_ready`` was set and READY never rose.
         """
         try:
-            state = self.wait_for_alive(timeout = liveness_timeout)
+            state = self.wait_for_alive(timeout = liveness_timeout, alive_grace = alive_grace)
         except GameNotRunningError:
             self._close()
             raise

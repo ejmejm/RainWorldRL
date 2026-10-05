@@ -31,6 +31,8 @@ using UnityEngine;
 ///                                  reported on the next frame written and then cleared. A starving sleep
 ///                                  (Win(malnourished: true) -> StarveScreen) does not count; it is visible as
 ///                                  cycle_number + 1 together with malnourished == 1.
+///   region                       : game.overWorld.activeWorld.region.name (World.cs:278, Region.cs:148), the
+///                                  region acronym ("SU", "HI", ...); empty while no world is loaded.
 ///
 /// Human override (<see cref="SetPaused"/>): no new actions are consumed, timescale is 1 and the
 /// keyboard passes through. A step already in flight finishes normally (at 1x) so Python still
@@ -359,7 +361,7 @@ public class StepController
     }
 
     /// <summary>
-    /// Writes karma/food/position/room/cycle, food_max/food_to_hibernate/malnourished, cycle_progress and
+    /// Writes karma/food/position/room/cycle, food_max/food_to_hibernate/malnourished, cycle_progress, region and
     /// the IN_SHELTER / RAIN flags (zeros / -1 when unavailable) and returns the death edge: true only on
     /// the step where player 0 went alive -> dead. Tracking resets whenever a different player instance
     /// appears (new game / respawn), so the next death is detected again.
@@ -427,6 +429,7 @@ public class StepController
             float cycleProgress = 0f;
             bool rain = false;
             World world = game.overWorld?.activeWorld;
+            string region = world?.region?.name ?? "";
             RainCycle rainCycle = world?.rainCycle;
             if (rainCycle != null && rainCycle.cycleLength > 0)
             {
@@ -472,6 +475,7 @@ public class StepController
             sharedMemory.WriteFoodToHibernate(foodToHibernate);
             sharedMemory.WriteMalnourished(malnourished);
             sharedMemory.WriteCycleProgress(cycleProgress);
+            sharedMemory.WriteRegion(region);
             sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_IN_SHELTER, inShelter);
             sharedMemory.SetGameFlag(SharedMemoryBridge.GAME_FLAG_RAIN, rain);
             return edge;

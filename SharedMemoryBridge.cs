@@ -30,7 +30,8 @@ using System.IO.MemoryMappedFiles;
 ///   48  f32  cycle_progress   mod->py fraction of the cycle elapsed (0..1, >1 once rain starts)
 ///   52  u8   food_to_hibernate mod->py pips needed to hibernate this cycle (= food_max while malnourished)
 ///   53  u8   malnourished     mod->py level: 1 while the save state is malnourished (last sleep was a starving one)
-///   54  10B  reserved
+///   54  4B   region           mod->py ASCII region acronym of the active world (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
+///   58  6B   reserved
 ///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
@@ -81,6 +82,8 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_CYCLE_PROGRESS = 48;
     private const int OFFSET_FOOD_TO_HIBERNATE = 52;
     private const int OFFSET_MALNOURISHED = 53;
+    private const int OFFSET_REGION = 54;
+    public const int REGION_SIZE = 4;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
     // action_bits (offset 44): one bit per player key. Must match rainworld_rl/shared_memory.py KEY_*
@@ -286,6 +289,27 @@ public class SharedMemoryBridge : IDisposable
     /// <summary>Writes the malnourished level flag (offset 53).</summary>
     public void WriteMalnourished(bool malnourished) => accessor.Write(OFFSET_MALNOURISHED, malnourished ? (byte)1 : (byte)0);
 
+    private readonly byte[] regionBuffer = new byte[REGION_SIZE];
+
+    /// <summary>
+    /// Writes the region acronym (offset 54, <see cref="REGION_SIZE"/> bytes): ASCII, truncated to
+    /// the field size and NUL-padded. Null / empty writes all NULs ("unavailable").
+    /// </summary>
+    public void WriteRegion(string region)
+    {
+        Array.Clear(regionBuffer, 0, REGION_SIZE);
+        if (!string.IsNullOrEmpty(region))
+        {
+            int n = Math.Min(region.Length, REGION_SIZE);
+            for (int i = 0; i < n; i++)
+            {
+                char c = region[i];
+                regionBuffer[i] = c < 128 ? (byte)c : (byte)'?';
+            }
+        }
+        accessor.WriteArray(OFFSET_REGION, regionBuffer, 0, REGION_SIZE);
+    }
+
     /// <summary>
     /// Writes the "unavailable" values for all game-state fields. Only the game-state bits of
     /// game_flags (<see cref="GAME_STATE_FLAGS_MASK"/>) are cleared; other bits keep their owner's value.
@@ -298,6 +322,7 @@ public class SharedMemoryBridge : IDisposable
         WriteCycleProgress(0f);
         WriteFoodToHibernate(0);
         WriteMalnourished(false);
+        WriteRegion(null);
     }
 
     private static byte ClampByte(int v)
