@@ -126,7 +126,6 @@ INFO_CONTRACT: Dict[str, Tuple[type, ...]] = {
     "rain": (bool, numbers.Integral),
     "dialog_open": (bool, numbers.Integral),
     "region": (str,),
-    "game_restarted": (bool,),
 }
 
 StepResult = Tuple[Any, Dict[str, Any]]

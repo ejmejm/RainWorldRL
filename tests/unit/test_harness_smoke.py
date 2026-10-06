@@ -161,7 +161,6 @@ class FakeEnv:
             "rain": False,
             "dialog_open": False,
             "region": "SU",
-            "game_restarted": False,
         }
 
 

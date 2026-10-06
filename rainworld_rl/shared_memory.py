@@ -568,9 +568,6 @@ class SharedMemoryClient:
         self._shm: Optional[Any] = None
         self._connected = False
         self._override_logged = False
-        # time.monotonic() of the last frame wait that saw HUMAN_OVERRIDE (RainWorldEnv's stuck check
-        # does not count the time before it).
-        self.last_override_time = 0.0
 
         # Timing stats
         self._timing_samples = 0
@@ -894,7 +891,6 @@ class SharedMemoryClient:
                     )
                     self._override_logged = True
                 time.sleep(self.slow_poll_interval)
-                self.last_override_time = time.monotonic()
                 # Do not let the override count against the step timeout.
                 deadline = time.monotonic() + timeout
                 state = self.read_state()
