@@ -35,6 +35,7 @@ public class RainWorldRL : BaseUnityPlugin
     private ConfigEntry<string> cfgSlugcat;
     private ConfigEntry<string> cfgSaveName;
     private ConfigEntry<float> cfgSpeedMultiplier;
+    private ConfigEntry<int> cfgRenderScale;
     private ConfigEntry<bool> cfgVerboseLogging;
 
     // State
@@ -58,14 +59,21 @@ public class RainWorldRL : BaseUnityPlugin
                 "Name of the isolated RL save profile. Stored under BepInEx/plugins/RainWorldRL/saves/<name>/.");
             cfgSpeedMultiplier = Config.Bind("Simulation", "SpeedMultiplier", 50f,
                 new ConfigDescription("Game-time speed multiplier while a step is running.", new AcceptableValueRange<float>(1f, 1000f)));
+            cfgRenderScale = Config.Bind("Simulation", "RenderScale", 2,
+                new ConfigDescription("While the agent is in control the game renders straight into a texture this many times the " +
+                    "observation size (same field of view), averaged down to the observation. 0 renders at the game's own 1366x768.",
+                    new AcceptableValueRange<int>(0, 8)));
             cfgVerboseLogging = Config.Bind("Logging", "Verbose", false,
                 "Log every process switch and other high-frequency diagnostics.");
 
             sharedMemory = new SharedMemoryBridge();
-            Logger.LogInfo("Shared memory bridge created");
+            Logger.LogInfo($"Shared memory bridge created ({sharedMemory.Location})");
 
             inputInjector = new InputInjector();
-            frameCapture = new FrameCapture(SharedMemoryBridge.DEFAULT_FRAME_WIDTH, SharedMemoryBridge.DEFAULT_FRAME_HEIGHT);
+            frameCapture = new FrameCapture(SharedMemoryBridge.DEFAULT_FRAME_WIDTH, SharedMemoryBridge.DEFAULT_FRAME_HEIGHT)
+            {
+                RenderScale = cfgRenderScale.Value,
+            };
 
             stepController = new StepController(sharedMemory, inputInjector, frameCapture, Logger)
             {
@@ -85,6 +93,7 @@ public class RainWorldRL : BaseUnityPlugin
             };
 
             cfgSpeedMultiplier.SettingChanged += (s, e) => stepController.SpeedMultiplier = cfgSpeedMultiplier.Value;
+            cfgRenderScale.SettingChanged += (s, e) => frameCapture.RenderScale = cfgRenderScale.Value;
             cfgSlugcat.SettingChanged += (s, e) => gameFlow.SlugcatName = cfgSlugcat.Value;
             cfgSaveName.SettingChanged += (s, e) => saveRedirector.SaveName = cfgSaveName.Value;
             cfgVerboseLogging.SettingChanged += (s, e) =>
@@ -194,6 +203,8 @@ public class RainWorldRL : BaseUnityPlugin
         rainWorld = self;
         stepController.OnRainWorldUpdate(self);
         orig(self);
+        if (stepControllerEnabled)
+            stepController.RunFastSteps(self);
     }
 
     void Update()
@@ -308,6 +319,8 @@ public class RainWorldRL : BaseUnityPlugin
 
         if (stepControllerEnabled)
             stepController.ProcessUpdate();
+        stepController.UpdateRendering();
+        frameCapture.SetAgentInControl(stepController.AgentInControl);
     }
 
     void FixedUpdate()
