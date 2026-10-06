@@ -25,15 +25,17 @@ suboptimal with two mechanisms:
   by default). Sleeping early does not refresh a patch, so the camper's hive is
   worth a few percent of a fresh room after the first cycle.
 * **Tiredness-scaled sleep** (``Sleep``): a survived cycle pays
-  ``weight * min(1, steps_awake / nominal_cycle_steps)``. Sleeping after 1 % of
-  a cycle pays 1 %; the only way to collect a full sleep is to stay out a full
-  cycle - and then the food you need is not where you slept.
+  ``weight * tiredness`` with
+  ``tiredness = min(1, steps_awake / nominal_cycle_steps) ** tiredness_power``
+  (power 2 by default). Sleeping after 10 % of a cycle pays 1 %; the only way
+  to collect a full sleep is to stay out a full cycle - and then the food you
+  need is not where you slept.
 
-Plus a bonus for sleeping with a surplus (pips above ``food_to_hibernate`` are
-capped by ``food_max``, Player.AddFood, so this is bounded), a death penalty,
-a small per-step malnourishment penalty, and an optional novelty bonus
-(``NewRoom``) that can be switched off for algorithms that bring their own
-intrinsic motivation.
+Plus a bonus for sleeping with a surplus, also scaled by tiredness (pips above
+``food_to_hibernate`` are capped by ``food_max``, Player.AddFood, so this is
+bounded), a death penalty, a small per-step malnourishment penalty, and an
+optional novelty bonus (``NewRoom``) that can be switched off for algorithms
+that bring their own intrinsic motivation.
 
 Composable terms
 ----------------
@@ -51,8 +53,8 @@ Drive terms (the default; weights are signed multipliers, defaults shown):
 * ``Food(below = 0.3, above = 0.1, satiety_decay = 0.5, recovery_steps = ...)``
   - per pip gained: ``below`` while the pip count is <= ``food_to_hibernate``,
   ``above`` beyond it, times the room's satiety factor.
-* ``Sleep(weight = 1.0, full_belly_per_pip = 0.25)`` - on ``cycle_survived``:
-  ``weight * tiredness + full_belly_per_pip * max(0, food - food_to_hibernate)``.
+* ``Sleep(weight = 1.0, full_belly_per_pip = 0.25, tiredness_power = 2.0)`` - on ``cycle_survived``:
+  ``tiredness * (weight + full_belly_per_pip * max(0, food - food_to_hibernate))``.
 * ``Death(weight = -3.0)``             - on the ``player_dead`` edge.
 * ``Malnourished(per_step = -0.0003)`` - every ready step while ``malnourished``.
 
@@ -92,9 +94,6 @@ NOMINAL_CYCLE_TICKS = 24000
 def nominal_cycle_steps(ticks_per_step: int = 1) -> int:
     """Env steps in one nominal cycle (``NOMINAL_CYCLE_TICKS / ticks_per_step``, at least 1)."""
     return max(1, round(NOMINAL_CYCLE_TICKS / max(1, int(ticks_per_step))))
-
-
-_nominal_cycle_steps = nominal_cycle_steps  # alias for use where a parameter shadows the name
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +215,7 @@ class Food(RewardTerm):
         self.below = float(below)
         self.above = float(above)
         self.satiety_decay = float(satiety_decay)
-        self.recovery_steps = int(recovery_steps if recovery_steps is not None else nominal_cycle_steps(1))
+        self.recovery_steps = int(recovery_steps if recovery_steps is not None else NOMINAL_CYCLE_TICKS)
         if self.recovery_steps < 1:
             raise ValueError("recovery_steps must be >= 1")
         self._step = 0
@@ -292,9 +291,7 @@ class Sleep(RewardTerm):
         if tiredness_power <= 0:
             raise ValueError("tiredness_power must be > 0")
         self.tiredness_power = float(tiredness_power)
-        self.nominal_cycle_steps = int(
-            nominal_cycle_steps if nominal_cycle_steps is not None else _nominal_cycle_steps(1)
-        )
+        self.nominal_cycle_steps = int(nominal_cycle_steps if nominal_cycle_steps is not None else NOMINAL_CYCLE_TICKS)
         if self.nominal_cycle_steps < 1:
             raise ValueError("nominal_cycle_steps must be >= 1")
         self.steps_awake = 0
@@ -368,10 +365,6 @@ class Malnourished(RewardTerm):
 
     def __init__(self, per_step: float = -0.0003, name: Optional[str] = None):
         super().__init__(per_step, name)
-
-    @property
-    def per_step(self) -> float:
-        return self.weight
 
     def __call__(self, prev_info: Info, info: Info) -> float:
         if _ready(info) and bool(info.get("malnourished", False)):
@@ -574,11 +567,6 @@ class DriveReward(InfoReward):
                          breakdown_key = breakdown_key, add_env_reward = add_env_reward)
 
 
-def default_terms(novelty: bool = True, ticks_per_step: int = 1, **weights) -> List[RewardTerm]:
-    """Fresh instances of the default reward's terms (``drive_terms``)."""
-    return drive_terms(novelty, ticks_per_step = ticks_per_step, **weights)
-
-
 def make_default_reward_env(env: gym.Env, novelty: bool = True, **weights) -> DriveReward:
     """Wrap ``env`` with the default ``DriveReward`` (``novelty`` toggles the ``NewRoom`` term)."""
     return DriveReward(env, novelty, **weights)
@@ -588,11 +576,6 @@ def make_default_reward_env(env: gym.Env, novelty: bool = True, **weights) -> Dr
 # Named alternative: sparse survival
 # ---------------------------------------------------------------------------
 
-def survive_cycle_terms() -> List[RewardTerm]:
-    """Fresh instances of the sparse alternative's terms: ``[CycleSurvived(1.0)]``."""
-    return [CycleSurvived(1.0)]
-
-
 class SurviveCycleReward(InfoReward):
     """
     Sparse alternative: ``+1`` on the step the slugcat survives a cycle
@@ -601,7 +584,7 @@ class SurviveCycleReward(InfoReward):
     """
 
     def __init__(self, env: gym.Env, **kwargs):
-        super().__init__(env, survive_cycle_terms(), **kwargs)
+        super().__init__(env, [CycleSurvived(1.0)], **kwargs)
 
 
 __all__ = [
@@ -625,7 +608,5 @@ __all__ = [
     "DriveReward",
     "SurviveCycleReward",
     "drive_terms",
-    "default_terms",
-    "survive_cycle_terms",
     "make_default_reward_env",
 ]

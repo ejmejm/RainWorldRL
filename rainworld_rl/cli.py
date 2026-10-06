@@ -23,6 +23,7 @@ from . import __version__, download, launcher
 from .config import (
     CONFIG_FILENAME,
     LINUX_DATA_DIR,
+    RENDERERS,
     USER_CONFIG_PATH,
     Config,
     ConfigError,
@@ -117,7 +118,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--container", type = Path, default = None, help = "Where the .sif image lives (Linux)")
     p.add_argument("--no-container", action = "store_true", help = "Run wine/Xvfb from the host instead (Linux)")
     p.add_argument("--image", default = DEFAULT_IMAGE, help = "Image to pull if the .sif is missing")
-    p.add_argument("--renderer", choices = ("auto", "cpu", "wsl", "virtualgl"), default = None)
+    p.add_argument("--renderer", choices = RENDERERS, default = None)
 
     p = sub.add_parser("doctor", help = "Launch the game, run random steps and report steps/s")
     p.add_argument("--steps", type = int, default = 500)

@@ -10,11 +10,9 @@ Resolution order for ``load_config()``:
 4. ``~/.config/rainworld_rl/rainworld_rl.toml``.
 5. Built-in defaults.
 
-Read from the file: ``game_dir``, ``rl_save_dir``, ``launch_timeout`` and, on
-Linux, ``container``, ``wine_prefix_dir`` and ``renderer``; everything else is
-derived from ``game_dir``. ``rl_save_dir`` is
-informational: the mod decides where the RL save lives, this value only tells
-Python where to look (e.g. for debugging).
+Read from the file: ``game_dir``, ``launch_timeout`` and, on Linux,
+``container``, ``wine_prefix_dir`` and ``renderer``; everything else is
+derived from ``game_dir``.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ USER_CONFIG_PATH = Path.home() / ".config" / "rainworld_rl" / CONFIG_FILENAME
 LINUX_DATA_DIR = Path.home() / ".local" / "share" / "rainworld_rl"
 
 if sys.platform == "win32":
-    DEFAULT_GAME_DIR = Path("Z:/SteamLibrary/steamapps/common/Rain World")
+    DEFAULT_GAME_DIR = Path("C:/Program Files (x86)/Steam/steamapps/common/Rain World")
 else:
     DEFAULT_GAME_DIR = LINUX_DATA_DIR / "game"
 DEFAULT_WINE_PREFIX_DIR = LINUX_DATA_DIR / "wine"
@@ -64,7 +62,6 @@ class Config:
         game_dir: Rain World installation directory (contains ``RainWorld.exe``).
         launch_timeout: Seconds ``launch()`` waits for the mod's heartbeat after
             starting the game.
-        rl_save_dir: Where the mod keeps the RL save (informational).
         container: Linux only: Apptainer image (.sif) that provides Wine and
             Xvfb. None runs ``wine`` / ``Xvfb`` from the host's PATH.
         wine_prefix_dir: Linux only: holds one Wine prefix per game instance
@@ -78,7 +75,6 @@ class Config:
 
     game_dir: Path = DEFAULT_GAME_DIR
     launch_timeout: float = DEFAULT_LAUNCH_TIMEOUT
-    rl_save_dir: Optional[Path] = None
     container: Optional[Path] = None
     wine_prefix_dir: Path = DEFAULT_WINE_PREFIX_DIR
     renderer: str = "auto"
@@ -89,10 +85,6 @@ class Config:
         object.__setattr__(self, "launch_timeout", float(self.launch_timeout))
         if self.launch_timeout <= 0:
             raise ConfigError(f"launch_timeout must be positive, got {self.launch_timeout}")
-        if self.rl_save_dir is None:
-            object.__setattr__(self, "rl_save_dir", self.plugins_dir / "RainWorldRL" / "saves")
-        else:
-            object.__setattr__(self, "rl_save_dir", Path(self.rl_save_dir))
         if self.container is not None:
             object.__setattr__(self, "container", Path(self.container))
         object.__setattr__(self, "wine_prefix_dir", Path(self.wine_prefix_dir))
@@ -155,7 +147,7 @@ def find_config_path(path: Optional[PathLike] = None) -> Optional[Path]:
 
 
 def _config_from_dict(data: Dict[str, Any], source: Optional[Path]) -> Config:
-    known = {"game_dir", "launch_timeout", "rl_save_dir", "container", "wine_prefix_dir", "renderer"}
+    known = {"game_dir", "launch_timeout", "container", "wine_prefix_dir", "renderer"}
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"Unknown config keys in {source}: {sorted(unknown)}")
@@ -169,7 +161,7 @@ def _config_from_dict(data: Dict[str, Any], source: Optional[Path]) -> Config:
         if isinstance(data["launch_timeout"], bool) or not isinstance(data["launch_timeout"], (int, float)):
             raise ConfigError("launch_timeout must be a number")
         kwargs["launch_timeout"] = float(data["launch_timeout"])
-    for key in ("rl_save_dir", "container", "wine_prefix_dir"):
+    for key in ("container", "wine_prefix_dir"):
         if key in data:
             if not isinstance(data[key], str):
                 raise ConfigError(f"{key} must be a string")

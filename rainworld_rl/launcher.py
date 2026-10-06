@@ -426,7 +426,8 @@ def _game_cpus(instance: int) -> Optional[List[int]]:
 
     The game hands each step through several threads (main thread, Unity's render worker, Wine's
     D3D thread, the GPU driver); kept on a few cores this ran 1.1-1.4x faster than spread over 16
-    (Vulcan L40S node and WSL, CPU and GPU renderers). The Python side needs no pinning.
+    (on a cluster node with an L40S GPU and on WSL, CPU and GPU renderers). The Python side needs
+    no pinning.
     """
     allowed = sorted(os.sched_getaffinity(0))
     if len(allowed) <= GAME_CPUS:
@@ -467,12 +468,13 @@ def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
     env.update(renderer_env)
     env.setdefault("DXVK_LOG_PATH", "none")  # DXVK would write logs into the shared game dir; stderr still has them
     # Make Unity's GC (Boehm) collect ~3x less often. Each collection suspends every thread, and under
-    # Wine each suspend/resume costs wineserver a ptrace; on hosts that audit ptrace (e.g. Vulcan) a full
-    # audit backlog then freezes the game for 10-60 s. Costs a 2 GB initial heap.
+    # Wine each suspend/resume costs wineserver a ptrace; on hosts that audit ptrace a full audit
+    # backlog then freezes the game for 10-60 s. Costs a 2 GB initial heap.
     env.setdefault("GC_INITIAL_HEAP_SIZE", str(2 * 1024 ** 3))
     env.setdefault("GC_FREE_SPACE_DIVISOR", "1")
     # Have the mod keep one core spinning while the agent plays: keeps clocks up so the per-step hand-offs
-    # between the game's threads stay fast (Vulcan: ~1.75x). On WSL2 the host manages clocks and it costs ~10%.
+    # between the game's threads stay fast (~1.75x on a cluster node with an L40S GPU). On WSL2 the host
+    # manages clocks and it costs ~10%.
     if "microsoft" not in platform.release().lower():
         env.setdefault("RAINWORLD_RL_CORE_WARMER", "1")
     cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
@@ -530,8 +532,8 @@ def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float]
     """
     Block until the mod's heartbeat advances (``MOD_ALIVE`` + changing heartbeat).
 
-    Does not set ``CONNECTED``. Raises ``LaunchError`` (with the BepInEx log
-    tail) on timeout.
+    Does not set ``CONNECTED``. Raises ``LaunchError`` (with the game log
+    tail, ``game_log_path``) on timeout.
     """
     config = config or load_config()
     timeout = config.launch_timeout if timeout is None else timeout
@@ -615,7 +617,7 @@ def launch(
         The Popen handle if a new process was started, else None.
 
     Raises:
-        LaunchError: with the tail of ``BepInEx/LogOutput.log`` in the message.
+        LaunchError: with the tail of the game log (``game_log_path``) in the message.
     """
     config = config or load_config()
     config.validate_game_dir()
@@ -686,7 +688,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
 
         if args.build_only:
-            if is_game_running():
+            if is_game_running(args.instance):
                 logger.warning("Game is running; the deployed DLL will not be reloaded until it restarts")
             path = build(config, deploy = True)
             print(f"Deployed {path}")
