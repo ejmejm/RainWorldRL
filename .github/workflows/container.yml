@@ -1,11 +1,13 @@
 # Build the Linux runtime image (Wine, Xvfb, Mesa, DXVK, VirtualGL, SteamCMD; no game files)
 # and publish it to ghcr.io/<owner>/rainworld-rl, which `rainworld-rl setup` pulls with Apptainer.
+# A release tag vX.Y.Z also publishes :vX.Y.Z, the tag that release's `rainworld-rl setup` pulls.
 name: container
 
 on:
   push:
     branches: [main]
     paths: [container/**]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -25,4 +27,6 @@ jobs:
         with:
           context: container
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/rainworld-rl:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/rainworld-rl:latest
+            ${{ startsWith(github.ref, 'refs/tags/v') && format('ghcr.io/{0}/rainworld-rl:{1}', github.repository_owner, github.ref_name) || '' }}
