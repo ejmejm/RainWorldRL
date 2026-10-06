@@ -935,7 +935,7 @@ class SharedMemoryClient:
             time.sleep(self.slow_poll_interval)
 
         if state.command_result == COMMAND_RESULT_ERROR:
-            raise CommandError(f"Mod reported an error executing command {command}; see BepInEx/LogOutput.log")
+            raise CommandError(f"Mod reported an error executing command {command}; see the game log (launcher.game_log_path)")
         return state.command_result
 
     def reset_game(self, timeout: float = 60.0) -> ModState:
