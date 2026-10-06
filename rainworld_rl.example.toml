@@ -26,7 +26,7 @@ launch_timeout = 120.0
 # wine_prefix_dir = "~/.local/share/rainworld_rl/wine"
 
 # Linux only. How the game is rendered:
-#   "auto"       default: "virtualgl" when an NVIDIA GPU is visible, else "wsl" on WSL2,
+#   "auto"       default: "virtualgl" when an NVIDIA GPU is usable, else "wsl" on WSL2,
 #                else "cpu"
 #   "cpu"        DXVK on Mesa lavapipe, on the CPU (works everywhere)
 #   "wsl"        WSL2's GPU through Mesa's d3d12 driver
