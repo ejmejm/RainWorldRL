@@ -1,6 +1,6 @@
 # Shared Memory Protocol (v4)
 
-The version is `PROTOCOL_VERSION` in `rainworld_rl/shared_memory.py` and `SharedMemoryBridge.cs`, sent in
+The version is `PROTOCOL_VERSION` in `rainworld_rl/shared_memory.py` and `mod/SharedMemoryBridge.cs` (the mod's C# source is in `mod/`), sent in
 the header at offset 15. Bump it whenever the header layout or the meaning of a field/command changes.
 
 Named memory-mapped file `RainWorldRL`, created by whichever side comes first
@@ -18,7 +18,7 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | Offset | Size | Dir     | Field              | Notes |
 |-------:|-----:|---------|--------------------|-------|
 | 0      | 1    | both    | `sync_flag`        | 0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING |
-| 1      | 1    | -       | reserved           | Was the v2 `action` byte. **No longer read by the mod**; v3 clients write `action_bits` at offset 44. Leave 0. |
+| 1      | 1    | -       | reserved           | Leave 0. |
 | 2      | 1    | py→mod  | `ticks_per_step`   | 1..255, 0 treated as 1 |
 | 3      | 1    | both    | `status`           | see Status bits |
 | 4      | 4    | py→mod  | `frame_width`      | uint32, clamped by mod to 1..1920 (default 160) |
@@ -51,7 +51,7 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 One bit per physical key a player can hold. Any combination may be set in the same step;
 the mod holds exactly these keys for every physics tick of the step. The authoritative list
 lives here and in `rainworld_rl/shared_memory.py` (`KEY_*`, `KEY_NAMES` in bit order) and
-`SharedMemoryBridge.cs` (`KEY_*`); the three must match. Python's gym action space is
+`mod/SharedMemoryBridge.cs` (`KEY_*`); the three must match. Python's gym action space is
 `MultiBinary(9)` in this bit order.
 
 | Bit | Key | Mask | Game binding (Rain World v1.11.8) | Effect |
@@ -164,7 +164,8 @@ start-of-cycle shelter.
 
 ## Connect handshake (Python side)
 
-1. Open the mapping. Read `heartbeat` twice ~100 ms apart; if it did not change and `MOD_ALIVE` is clear → no game running → raise.
+1. Open the mapping and poll `heartbeat` until it advances. If it stays static for `liveness_timeout` (default 2 s) with `MOD_ALIVE` clear → no game running → raise `GameNotRunningError`.
+   With `MOD_ALIVE` set the wait extends to `alive_grace` (default 15 s) before raising: right after launch the game's initial load runs synchronously, so the heartbeat stalls although the mod is up.
    Then check `protocol_version == PROTOCOL_VERSION`; on a mismatch close the mapping and raise `ProtocolVersionError` (without setting `CONNECTED`).
 2. Write `frame_width/height`, set `CONNECTED`.
 3. Wait for `READY` (timeout configurable, default 60 s; the mod may still be entering the game).

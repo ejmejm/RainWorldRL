@@ -95,7 +95,6 @@ On the `cycle_survived` edge the reward is
 ```
 tiredness * (weight + full_belly_per_pip * max(0, food_before_sleep - food_to_hibernate))
 tiredness = min(1, steps_awake / nominal_cycle_steps) ** tiredness_power    # default power 2
-tiredness = min(1, steps_awake / nominal_cycle_steps)
 ```
 
 `steps_awake` counts real env steps since the last sleep (or since `reset()`),
@@ -113,12 +112,12 @@ True) earns nothing but still resets `steps_awake`.
 unscaled, a "glutton camper" that eats *7* pips per quick pseudo-cycle (hive +
 fruit that regrows on the cycle counter) would collect 0.75 per sleep and beat
 the forager by a wide margin (synthetic run: 67 vs 10). Scaling the whole sleep
-reward by tiredness closes that: a sleep after 2.5% of a cycle pays 2.5% of
+reward by tiredness closes that: a sleep after 2.5% of a cycle pays 0.06% of
 everything. `test_scenario_glutton_camper_report` asserts the forager wins.
 
 **Why tiredness is squared:** with a linear ramp the lifetime sleep reward is
 rate-neutral - it accrues per step awake, so 120 quick sleeps earn as much as
-3 full ones and the forager only won through food (9.7 vs 8.5). A convex ramp
+3 full ones and the forager beat the glutton camper only 9.7 to 8.5. A convex ramp
 (`tiredness_power = 2`) makes a sleep after 2.5% of a cycle worth 0.06% of a
 full one, which is what sleep pressure feels like and what makes quick cycles
 strictly lose.
@@ -150,17 +149,18 @@ strictly lose.
 | `Sleep` | `weight` | `1.0` | x tiredness on `cycle_survived` |
 | `Sleep` | `full_belly_per_pip` | `0.25` | per pip above `food_to_hibernate` at the sleep |
 | `Sleep` | `nominal_cycle_steps` | `nominal_cycle_steps(ticks_per_step)` | steps awake for tiredness 1.0 |
+| `Sleep` | `tiredness_power` | `2.0` | exponent of the tiredness ramp |
 | `Death` | `weight` | `-3.0` | `player_dead` edge |
 | `Malnourished` | `per_step` | `-0.0003` | every ready step while malnourished |
 
 All are keyword arguments of `drive_terms` / `DriveReward` /
 `make_default_reward_env` (`new_room`, `food_below`, `food_above`,
-`satiety_decay`, `recovery_steps`, `sleep`, `full_belly_per_pip`, `death`,
-`malnourished`; `ticks_per_step` overrides what is read from the env).
+`satiety_decay`, `recovery_steps`, `sleep`, `full_belly_per_pip`, `tiredness_power`,
+`death`, `malnourished`; `ticks_per_step` overrides what is read from the env).
 
 ### Camper vs forager (unit-test scenario)
 
-`rainworld_rl/tests_unit/test_rewards.py::test_scenario_forager_beats_camper_over_the_same_number_of_steps`
+`tests/unit/test_rewards.py::test_scenario_forager_beats_camper_over_the_same_number_of_steps`
 replays synthetic infos for 18000 env steps at 4 ticks/step (3 nominal
 cycles): a camper that eats 4 pips at one hive and sleeps at once every 100
 steps (180 sleeps) against a forager that eats 7 pips in 7 rooms over a full
@@ -168,9 +168,9 @@ cycle and then sleeps (3 sleeps).
 
 | | NewRoom | Food | Sleep | Total |
 |--|--:|--:|--:|--:|
-| camper, novelty on | 1.0 | 2.39 | 2.97 | **6.36** |
+| camper, novelty on | 1.0 | 2.39 | 0.05 | **3.44** |
 | forager, novelty on | 7.0 | 4.50 | 5.25 | **16.75** |
-| camper, novelty off | - | 2.39 | 2.97 | **5.36** |
+| camper, novelty off | - | 2.39 | 0.05 | **2.44** |
 | forager, novelty off | - | 4.50 | 5.25 | **9.75** |
 
 ## Composing alternatives
