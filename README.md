@@ -38,6 +38,34 @@ On Linux the `renderer` config key picks how frames are drawn. The default `auto
 (Mesa on the CPU) otherwise. A pip install ships a prebuilt mod DLL, so the .NET SDK is only needed
 to change the mod.
 
+## Using the environment
+
+Once `rainworld-rl doctor` works:
+
+```python
+from rainworld_rl import RainWorldEnv, launcher
+from rainworld_rl.rewards import make_default_reward_env
+
+env = RainWorldEnv()                 # 160x90 RGB frames, 4 game ticks (100 ms) per step
+env.launch()                         # start the game (headless on Linux) and connect
+env = make_default_reward_env(env)   # DriveReward: food, sleep, death, new rooms
+
+obs, info = env.reset()              # wipe the RL save and start a fresh game
+for step in range(10_000):
+    action = env.action_space.sample()   # MultiBinary(9): left right up down jump grab throw map special
+    obs, reward, terminated, truncated, info = env.step(action)
+    # Continuing environment: terminated and truncated are always False. A death is just a step
+    # with info["player_dead"]; the slugcat respawns in its last shelter and play goes on.
+    if info["player_dead"]:
+        print(f"step {step}: died")
+
+env.close()                          # detach; the game keeps running
+launcher.kill_game()                 # stop it
+```
+
+`rainworld_rl.DiscreteActions` wraps the env with a Discrete(18) action set. See `docs/PYTHON_API.md`
+for the `info` fields, other rewards and options.
+
 ## Development
 
 ```
