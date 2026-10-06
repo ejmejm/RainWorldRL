@@ -451,6 +451,11 @@ def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
     renderer_env, wrapper = _renderer(config)
     env.update(renderer_env)
     env.setdefault("DXVK_LOG_PATH", "none")  # DXVK would write logs into the shared game dir; stderr still has them
+    # Make Unity's GC (Boehm) collect ~3x less often. Each collection suspends every thread, and under
+    # Wine each suspend/resume costs wineserver a ptrace; on hosts that audit ptrace (e.g. Vulcan) a full
+    # audit backlog then freezes the game for 10-60 s. Costs a 2 GB initial heap.
+    env.setdefault("GC_INITIAL_HEAP_SIZE", str(2 * 1024 ** 3))
+    env.setdefault("GC_FREE_SPACE_DIVISOR", "1")
     cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
     cpus = _game_cpus(instance)
     if cpus and shutil.which("taskset"):
