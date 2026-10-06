@@ -18,7 +18,7 @@ using UnityEngine;
 /// (SharedMemoryBridge.KEY_*) injected by InputInjector; the pause button is blocked while the
 /// agent is in control.
 /// </summary>
-[BepInPlugin("rainworld.rl", "RainWorldRL", "0.2")]
+[BepInPlugin("rainworld.rl", "RainWorldRL", "1.1.0")]
 public class RainWorldRL : BaseUnityPlugin
 {
     private const KeyCode HUMAN_OVERRIDE_KEY = KeyCode.F10;
@@ -80,7 +80,6 @@ public class RainWorldRL : BaseUnityPlugin
             stepController = new StepController(sharedMemory, inputInjector, frameCapture, Logger)
             {
                 SpeedMultiplier = cfgSpeedMultiplier.Value,
-                VerboseLogging = cfgVerboseLogging.Value,
             };
 
             saveRedirector = new SaveRedirector(Logger)
@@ -101,11 +100,7 @@ public class RainWorldRL : BaseUnityPlugin
             cfgRenderScale.SettingChanged += (s, e) => frameCapture.RenderScale = cfgRenderScale.Value;
             cfgSlugcat.SettingChanged += (s, e) => gameFlow.SlugcatName = cfgSlugcat.Value;
             cfgSaveName.SettingChanged += (s, e) => saveRedirector.SaveName = cfgSaveName.Value;
-            cfgVerboseLogging.SettingChanged += (s, e) =>
-            {
-                stepController.VerboseLogging = cfgVerboseLogging.Value;
-                gameFlow.VerboseLogging = cfgVerboseLogging.Value;
-            };
+            cfgVerboseLogging.SettingChanged += (s, e) => gameFlow.VerboseLogging = cfgVerboseLogging.Value;
 
             sharedMemory.SetStatusFlag(SharedMemoryBridge.STATUS_MOD_ALIVE, true);
 
@@ -277,11 +272,12 @@ public class RainWorldRL : BaseUnityPlugin
                 SetHumanOverride(!humanOverride);
         }
 
-        // Commands
+        // Commands. RESET is acked by GameFlowController once the fresh game is up; the debug commands are acked
+        // as soon as they are applied, and their effect (respawn, arrival, sleep) is observed through later steps.
         byte command = sharedMemory.ReadCommand();
-        if (command == SharedMemoryBridge.CMD_RESET && !gameFlow.ResetInProgress)
+        if (command == SharedMemoryBridge.CMD_RESET)
         {
-            if (!gameFlow.RequestReset())
+            if (!gameFlow.ResetInProgress && !gameFlow.RequestReset())
             {
                 Logger.LogWarning("RESET command received but RL mode is not fully on; reporting ERROR");
                 sharedMemory.WriteCommandResult(SharedMemoryBridge.RESULT_ERROR);
@@ -289,63 +285,14 @@ public class RainWorldRL : BaseUnityPlugin
             }
         }
         else if (command == SharedMemoryBridge.CMD_KILL_PLAYER)
-        {
-            // Debug/testing aid: kill player 0 synchronously and ack as soon as it is dead.
-            // The respawn is NOT awaited - Python observes it through subsequent steps.
-            bool killed = false;
-            try
-            {
-                killed = gameFlow.KillPlayer(rainWorld);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"KILL_PLAYER failed: {ex}");
-            }
-            if (!killed)
-                Logger.LogWarning("KILL_PLAYER command could not be applied; reporting ERROR");
-            sharedMemory.WriteCommandResult(killed ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
-            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
-        }
+            RunCommand("KILL_PLAYER", () => gameFlow.KillPlayer(rainWorld));
         else if (command == SharedMemoryBridge.CMD_ENTER_SHELTER)
-        {
-            // Debug/testing aid: send player 0 into its den shelter with command_arg food pips and ack at once.
-            // The arrival and any sleep are observed through subsequent steps.
-            bool sent = false;
-            try
-            {
-                sent = gameFlow.EnterShelter(rainWorld, sharedMemory.ReadCommandArg());
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"ENTER_SHELTER failed: {ex}");
-            }
-            if (!sent)
-                Logger.LogWarning("ENTER_SHELTER command could not be applied; reporting ERROR");
-            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
-            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
-        }
-        else if (command == SharedMemoryBridge.CMD_HOP_ROOM || command == SharedMemoryBridge.CMD_SWITCH_REGION)
-        {
-            // Debug/testing aids: send player 0 into a neighbouring room / region (command_arg picks the exit / gate)
-            // and ack once it is on its way. The arrival is observed through subsequent steps.
-            bool hop = command == SharedMemoryBridge.CMD_HOP_ROOM;
-            string name = hop ? "HOP_ROOM" : "SWITCH_REGION";
-            bool sent = false;
-            try
-            {
-                int arg = sharedMemory.ReadCommandArg();
-                sent = hop ? gameFlow.HopRoom(rainWorld, arg) : gameFlow.SwitchRegion(rainWorld, arg);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"{name} failed: {ex}");
-            }
-            if (!sent)
-                Logger.LogWarning($"{name} command could not be applied; reporting ERROR");
-            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
-            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
-        }
-        else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
+            RunCommand("ENTER_SHELTER", () => gameFlow.EnterShelter(rainWorld, sharedMemory.ReadCommandArg()));
+        else if (command == SharedMemoryBridge.CMD_HOP_ROOM)
+            RunCommand("HOP_ROOM", () => gameFlow.HopRoom(rainWorld, sharedMemory.ReadCommandArg()));
+        else if (command == SharedMemoryBridge.CMD_SWITCH_REGION)
+            RunCommand("SWITCH_REGION", () => gameFlow.SwitchRegion(rainWorld, sharedMemory.ReadCommandArg()));
+        else if (command != SharedMemoryBridge.CMD_NONE)
         {
             Logger.LogWarning($"Unknown command {command}; reporting ERROR");
             sharedMemory.WriteCommandResult(SharedMemoryBridge.RESULT_ERROR);
@@ -390,6 +337,24 @@ public class RainWorldRL : BaseUnityPlugin
             return;
 
         stepController.ProcessPostRender();
+    }
+
+    /// <summary>Applies a debug command, then reports OK/ERROR in command_result and clears the command.</summary>
+    private void RunCommand(string name, Func<bool> apply)
+    {
+        bool ok = false;
+        try
+        {
+            ok = apply();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"{name} failed: {ex}");
+        }
+        if (!ok)
+            Logger.LogWarning($"{name} command could not be applied; reporting ERROR");
+        sharedMemory.WriteCommandResult(ok ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+        sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
     }
 
     private void SetHumanOverride(bool value)

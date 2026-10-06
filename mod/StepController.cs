@@ -122,13 +122,6 @@ public class StepController
     /// <summary>The agent drives the game: RL mode on, no human override, game READY (frozen between steps).</summary>
     public bool AgentInControl => enabled && !paused && HoldWhenIdle;
 
-    public bool VerboseLogging { get; set; } = false;
-
-    public bool IsEnabled => enabled;
-    public bool IsPaused => paused;
-    public int CurrentTick => currentTick;
-    public RainWorld RainWorld => rainWorld;
-
     public StepController(SharedMemoryBridge sharedMemory, InputInjector inputInjector, FrameCapture frameCapture, ManualLogSource log)
     {
         this.sharedMemory = sharedMemory;

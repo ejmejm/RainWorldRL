@@ -28,7 +28,6 @@ public class FrameCapture : IDisposable
 
     public int Width => width;
     public int Height => height;
-    public int FrameSize => width * height * 3;
 
     /// <summary>The camera renders into a texture this many times the frame size while the agent is in
     /// control; the capture averages it down. 0 keeps the game's own full-size target.</summary>

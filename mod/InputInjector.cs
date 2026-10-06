@@ -39,8 +39,6 @@ public class InputInjector
     private const int ACTION_TAKE = 3;
     private const int ACTION_THROW = 4;
     private const int ACTION_PAUSE = 5;
-    private const int ACTION_UI_HORIZONTAL = 6;
-    private const int ACTION_UI_VERTICAL = 7;
     private const int ACTION_UI_SUBMIT = 8;
     private const int ACTION_UI_CANCEL = 9;
     private const int ACTION_MAP = 11;
@@ -68,9 +66,6 @@ public class InputInjector
 
     /// <summary>-1 down, 0 none/both, +1 up.</summary>
     public int VerticalAxis => (Up ? 1 : 0) - (Down ? 1 : 0);
-
-    public bool IsInstalled => installed;
-    public bool IsOverrideActive => overrideActive;
 
     /// <summary>Installs the input hooks. Safe to call once; hooks are inert until <see cref="EnableOverride"/>.</summary>
     public void Install()
@@ -178,10 +173,11 @@ public class InputInjector
     // ------------------------------------------------------------------ package building
 
     /// <summary>
-    /// Builds the per-tick Player input from the held keys, following RWInput.PlayerInputLogic's
-    /// keyboard path (RWInput.cs:185-275).
+    /// Builds an InputPackage from the held keys, following RWInput.PlayerInputLogic's keyboard path
+    /// (RWInput.cs:185-275). <paramref name="ui"/>: menu/dialog input, the UI category (RWInput.cs:209-223):
+    /// jump = submit, throw = cancel, map = mp; pckp/spec are not part of it and stay false.
     /// </summary>
-    public Player.InputPackage BuildGameInput()
+    private Player.InputPackage BuildInput(bool ui)
     {
         int x = HorizontalAxis;
         int y = VerticalAxis;
@@ -190,35 +186,13 @@ public class InputInjector
             gamePad: false,
             controllerType: Options.ControlSetup.Preset.KeyboardSinglePlayer,
             x: x, y: y,
-            jmp: Jump, thrw: Throw, pckp: Grab, mp: Map,
+            jmp: Jump, thrw: Throw, pckp: Grab && !ui, mp: Map,
             crouchToggle: false, // never set by any input path in v1.11.8 (only RWInput.cs:319, always false)
-            spec: Special);
+            spec: Special && !ui);
 
         input.analogueDir = (x != 0 || y != 0) ? new Vector2(x, y).normalized : Vector2.zero;
 
         // Down + a side key = downward diagonal (crawl / roll direction). Matches RWInput.cs:252-262 (MMF path).
-        input.downDiagonal = (y < 0 && x != 0) ? x : 0;
-        return input;
-    }
-
-    /// <summary>
-    /// Builds the menu/dialog input from the held keys, following the UI category of
-    /// RWInput.PlayerInputLogic (RWInput.cs:209-223): jump = submit, throw = cancel, map = mp;
-    /// pckp/spec are not part of the UI category and stay false.
-    /// </summary>
-    public Player.InputPackage BuildUIInput()
-    {
-        int x = HorizontalAxis;
-        int y = VerticalAxis;
-
-        Player.InputPackage input = new Player.InputPackage(
-            gamePad: false,
-            controllerType: Options.ControlSetup.Preset.KeyboardSinglePlayer,
-            x: x, y: y,
-            jmp: Jump, thrw: Throw, pckp: false, mp: Map,
-            crouchToggle: false, spec: false);
-
-        input.analogueDir = (x != 0 || y != 0) ? new Vector2(x, y).normalized : Vector2.zero;
         input.downDiagonal = (y < 0 && x != 0) ? x : 0;
         return input;
     }
@@ -245,7 +219,7 @@ public class InputInjector
     {
         if (!overrideActive || playerNumber != 0)
             return orig(playerNumber);
-        return BuildGameInput();
+        return BuildInput(ui: false);
     }
 
     private Player.InputPackage RWInput_PlayerUIInput_int(On.RWInput.orig_PlayerUIInput_int orig, int playerNumber)
@@ -253,7 +227,7 @@ public class InputInjector
         // playerNumber is -1 ("any player") from Menu.Menu; in RL mode there is only player 0.
         if (!UIInjectionApplies() || playerNumber > 0)
             return orig(playerNumber);
-        return BuildUIInput();
+        return BuildInput(ui: true);
     }
 
     private bool RWInput_CheckPauseButton_int_bool(On.RWInput.orig_CheckPauseButton_int_bool orig, int playerNumber, bool inMenu)

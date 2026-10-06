@@ -163,9 +163,6 @@ public class GameFlowController
     /// <summary>RL mode is on or in transition (anything but Off).</summary>
     public bool IsActive => state != FlowState.Off;
 
-    /// <summary>RL mode fully entered (save swapped) and not exiting.</summary>
-    public bool IsOn => state == FlowState.On;
-
     public bool ResetInProgress => resetState != ResetState.None;
 
     /// <summary>Set once per Update by <see cref="Update"/>.</summary>
@@ -329,20 +326,6 @@ public class GameFlowController
 
         desired = on;
         log?.LogInfo($"[GameFlow] RL mode {(on ? "requested" : "release requested")}");
-    }
-
-    /// <summary>Explicit entry point (equivalent to SetDesired(true)).</summary>
-    public void EnterRLMode(RainWorld rw)
-    {
-        SetDesired(true);
-        Update(rw);
-    }
-
-    /// <summary>Explicit exit point (equivalent to SetDesired(false)).</summary>
-    public void ExitRLMode(RainWorld rw)
-    {
-        SetDesired(false);
-        Update(rw);
     }
 
     /// <summary>

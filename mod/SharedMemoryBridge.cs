@@ -7,7 +7,7 @@ using System.IO.MemoryMappedFiles;
 ///
 /// Header layout (64 bytes):
 ///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
-///   1   u8   reserved         (was the v2 action byte; v3 clients write action_bits at 44)
+///   1   u8   reserved
 ///   2   u8   ticks_per_step   py->mod (0 treated as 1)
 ///   3   u8   status           shared bitfield; each side only writes its own bits
 ///   4   u32  frame_width      py->mod
@@ -66,7 +66,7 @@ public class SharedMemoryBridge : IDisposable
 
     // Header offsets
     private const int OFFSET_SYNC_FLAG = 0;
-    // offset 1 is reserved (legacy v2 action byte, no longer read)
+    // offset 1 is reserved
     private const int OFFSET_TICKS_PER_STEP = 2;
     private const int OFFSET_STATUS = 3;
     private const int OFFSET_WIDTH = 4;
@@ -258,14 +258,10 @@ public class SharedMemoryBridge : IDisposable
 
     // ----- counters -----
 
-    public uint ReadHeartbeat() => accessor.ReadUInt32(OFFSET_HEARTBEAT);
-
     public void IncrementHeartbeat()
     {
         accessor.Write(OFFSET_HEARTBEAT, unchecked(accessor.ReadUInt32(OFFSET_HEARTBEAT) + 1u));
     }
-
-    public uint ReadStepCounter() => accessor.ReadUInt32(OFFSET_STEP_COUNTER);
 
     public void IncrementStepCounter()
     {
