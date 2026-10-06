@@ -30,6 +30,7 @@ public class RainWorldRL : BaseUnityPlugin
     private StepController stepController;
     private SaveRedirector saveRedirector;
     private GameFlowController gameFlow;
+    private WorkerThreadFix workerThreadFix;
 
     // Config
     private ConfigEntry<string> cfgSlugcat;
@@ -91,6 +92,7 @@ public class RainWorldRL : BaseUnityPlugin
                 SlugcatName = cfgSlugcat.Value,
                 VerboseLogging = cfgVerboseLogging.Value,
             };
+            workerThreadFix = new WorkerThreadFix(Logger);
 
             cfgSpeedMultiplier.SettingChanged += (s, e) => stepController.SpeedMultiplier = cfgSpeedMultiplier.Value;
             cfgRenderScale.SettingChanged += (s, e) => frameCapture.RenderScale = cfgRenderScale.Value;
@@ -174,6 +176,7 @@ public class RainWorldRL : BaseUnityPlugin
             inputInjector.Install();
             saveRedirector.Install();
             gameFlow.Install();
+            workerThreadFix.Install();
             stepController.Install();
             hooksInstalled = true;
             Logger.LogInfo("Game hooks installed");
@@ -189,6 +192,7 @@ public class RainWorldRL : BaseUnityPlugin
         if (!hooksInstalled)
             return;
 
+        workerThreadFix?.Uninstall();
         stepController?.Uninstall();
         gameFlow?.Uninstall();
         saveRedirector?.Uninstall();
