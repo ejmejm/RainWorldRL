@@ -23,7 +23,7 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 3      | 1    | both    | `status`           | see Status bits |
 | 4      | 4    | py→mod  | `frame_width`      | uint32, clamped by mod to 1..1920 (default 160) |
 | 8      | 4    | py→mod  | `frame_height`     | uint32, clamped by mod to 1..1080 (default 90) |
-| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested), 3 ENTER_SHELTER (debug: send player 0 into its den shelter with `command_arg` food pips so a real hibernation can be tested). Mod sets back to 0 when done. |
+| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested), 3 ENTER_SHELTER (debug: send player 0 into its den shelter with `command_arg` food pips so a real hibernation can be tested), 4 HOP_ROOM / 5 SWITCH_REGION (debug: send player 0 into a neighbouring room / region, for soak tests of room and region loading). Mod sets back to 0 when done. |
 | 13     | 1    | mod→py  | `command_result`   | 0 none/in-progress, 1 OK, 2 ERROR. Mod writes after finishing a command; Python clears to 0 before issuing the next. |
 | 14     | 1    | mod→py  | `game_flags`       | b0 IN_SHELTER (level), b1 CYCLE_SURVIVED (edge: hibernation succeeded during this step), b2 RAIN (level: cycle end has begun), b3 DIALOG_OPEN (level: an in-game prompt awaits a key press - a `Menu.Dialog` side process, the game-over "press X to restart" prompt, or an open pause menu; see **Action bits**) |
 | 15     | 1    | mod→py  | `protocol_version` | uint8, `PROTOCOL_VERSION` (4), written as soon as the mapping exists, so it is present whenever `MOD_ALIVE` is. A mod build from before versioning leaves 0. |
@@ -42,7 +42,7 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 52     | 1    | mod→py  | `food_to_hibernate`| uint8, food pips needed to hibernate this cycle (`SlugcatStats.foodToHibernate`; Survivor 4; equals `food_max` while malnourished; 0 if unavailable) |
 | 53     | 1    | mod→py  | `malnourished`     | uint8 0/1 (level), `SaveState.malnourished`: the previous sleep was a starving one, so this cycle needs `food_max` pips to sleep |
 | 54     | 4    | mod→py  | `region`           | ASCII region acronym of the active world (`World.region.name`, e.g. `SU`, `HI`), NUL-padded to 4 bytes; all NUL (empty string) when no world is loaded. Combine with `room_index` for a save-wide room key: room indices are only unique within a region. |
-| 58     | 1    | py→mod  | `command_arg`      | uint8 argument of `command`, written before it (ENTER_SHELTER: food pips; ignored by the others) |
+| 58     | 1    | py→mod  | `command_arg`      | uint8 argument of `command`, written before it (ENTER_SHELTER: food pips; HOP_ROOM: exit; SWITCH_REGION: gate; ignored by the others) |
 | 59     | 5    | -       | reserved           | |
 | 64     | N    | mod→py  | `frame`            | RGB24, row-major, top row first, width*height*3 bytes |
 
@@ -127,7 +127,7 @@ are zeroed/-1 and `IN_GAME` is clear. (The mod is expected to auto-return to the
 
 ## Commands (offset 12)
 
-Python clears `command_result` to 0, writes `command_arg` and a command (`RESET`, `KILL_PLAYER` or `ENTER_SHELTER`), then polls `command_result`
+Python clears `command_result` to 0, writes `command_arg` and a command (`RESET`, `KILL_PLAYER`, `ENTER_SHELTER`, `HOP_ROOM` or `SWITCH_REGION`), then polls `command_result`
 until nonzero (timeout ~60s). The mod performs the command on the main thread, writes
 `command_result`, then writes `command = NONE`. RESET = delete the RL save directory
 contents, start a fresh story game as the configured slugcat, wait until `READY`, then ack.
@@ -136,10 +136,24 @@ normal respawn flow runs); ack once the kill has been applied (`ERROR` if RL mod
 no realized player 0 exists, or it is already dead). The ack never waits for the respawn.
 ENTER_SHELTER = set player 0's food to `command_arg` pips and send it into its den shelter (the save's
 den, or the slugcat's default shelter while the den is not one, e.g. on a fresh save) through the shelter's
-entrance pipe, as if it had walked in; ack at once (`ERROR` as for KILL_PLAYER, or if that shelter is not in
+entrance pipe, as if it had walked in; ack at once (`ERROR` as for HOP_ROOM, or if that shelter is not in
 the current region). The game's own shelter logic takes over: with `food_to_hibernate` pips the slugcat
 hibernates once it stands still more than 6 tiles from the entrance; with fewer (at least 1) holding `down`
 there for 260 ticks makes it sleep starving. Either way the door closes in 320 ticks and the cycle reloads.
+HOP_ROOM = send player 0 out through exit `command_arg % n` of its room's `n` usable exits (exits that lead
+nowhere, e.g. a gate room's far side, are skipped) into the neighbouring room, arriving from the pipe that leads
+back, the same path as walking through that pipe; ack at once (`ERROR` if RL mode is not fully on, player 0 is
+not alive in a room, it is already on its way between rooms - in or entering a pipe, or a gate or SWITCH_REGION
+is loading a region - or the room has no usable exit). `READY` stays set: `room_index` changes once the next room
+has loaded and the slugcat is in its pipe (typically within ~10 ticks); it comes out of the pipe within a few
+dozen ticks more.
+SWITCH_REGION = take player 0 through region gate `command_arg % n` of its region's `n` usable gates (in world-file
+order) into the neighbouring region with the game's own gate and world-loading code, skipping the karma
+requirement: the slugcat is sent into the gate room through its pipe on this side and ignores input from then on;
+once it is in the room the mod starts the gate, `region` changes when the next region's world has loaded
+(a few hundred ticks), and the slugcat then leaves the gate room through its far exit into the new region and takes input
+again. Ack once it is on its way to the gate room (`ERROR` as for HOP_ROOM, or if the region has no usable gate).
+Other moves are rejected until it has left the gate room. A death or RESET meanwhile abandons the switch.
 
 Death -> respawn (any death, not just KILL_PLAYER): the game only leaves its "game over" prompt on a
 key press that injected RL input cannot produce, so while RL mode is on the mod presses it itself
