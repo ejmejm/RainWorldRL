@@ -282,6 +282,7 @@ def start_game(config: Optional[Config] = None, instance: int = 0) -> subprocess
 # skip the wine-mono / wine-gecko installers (Unity brings its own Mono).
 WINE_DLL_OVERRIDES = "winhttp=n,b;mscoree=;mshtml="
 XVFB_SCREEN = "1366x768x24"
+GAME_CPUS = 6  # cores each game instance is pinned to (see _game_cpus)
 
 # Create a Wine prefix. If the image ships DXVK (/opt/dxvk), install it: D3D11 -> Vulkan on lavapipe
 # renders ~1.5x faster than Wine's own D3D11 -> OpenGL on llvmpipe. DXVK crashes (division by zero in
@@ -402,6 +403,22 @@ def _ensure_prefix(config: Config, instance: int) -> Path:
     return prefix
 
 
+def _game_cpus(instance: int) -> Optional[List[int]]:
+    """
+    CPUs to pin this instance's game to: a block of ``GAME_CPUS`` of the CPUs this process may
+    use, a different block per instance (wrapping around when there are too few). None when there
+    are no more than ``GAME_CPUS`` to choose from.
+
+    The game hands each step through several threads (main thread, Unity's render worker, Wine's
+    D3D thread, the GPU driver); kept on a few cores this ran 1.1-1.4x faster than spread over 16
+    (Vulcan L40S node and WSL, CPU and GPU renderers). The Python side needs no pinning.
+    """
+    allowed = sorted(os.sched_getaffinity(0))
+    if len(allowed) <= GAME_CPUS:
+        return None
+    return [allowed[(instance * GAME_CPUS + i) % len(allowed)] for i in range(GAME_CPUS)]
+
+
 def _linux_pidfile(instance: int) -> Path:
     return Path(default_shm_path(instance) + ".pid")
 
@@ -435,8 +452,14 @@ def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
     env.update(renderer_env)
     env.setdefault("DXVK_LOG_PATH", "none")  # DXVK would write logs into the shared game dir; stderr still has them
     cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
+    cpus = _game_cpus(instance)
+    if cpus and shutil.which("taskset"):
+        cmd = ["taskset", "-c", ",".join(map(str, cpus)), *cmd]
     log_path = prefix.with_suffix(".log")
-    logger.info("Starting instance %d (renderer %s): %s (output in %s)", instance, resolve_renderer(config), config.exe_path, log_path)
+    logger.info(
+        "Starting instance %d (renderer %s, CPUs %s): %s (output in %s)",
+        instance, resolve_renderer(config), cpus or "all", config.exe_path, log_path,
+    )
     with open(log_path, "wb") as log:
         try:
             process = subprocess.Popen(
