@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 GAME_PROCESS_NAME = "RainWorld.exe"
 BUILD_CONFIGURATION = "Debug"
-BUILT_DLL_RELATIVE = Path("bin") / BUILD_CONFIGURATION / "net472" / "RainWorldRL.dll"
+MOD_SOURCE_DIR = REPO_ROOT / "mod"
 # The prebuilt mod shipped with the package, so a pip install needs no .NET SDK. build() refreshes it
 # whenever the mod sources change; SOURCE_HASH records which sources it was built from.
 PACKAGED_DLL = Path(__file__).resolve().parent / "mod" / "RainWorldRL.dll"
@@ -125,11 +125,11 @@ def _run(
 
 def mod_source_hash() -> Optional[str]:
     """sha256 of the mod sources (line endings normalised), or None outside a source checkout."""
-    project = REPO_ROOT / "RainWorldRL.csproj"
+    project = MOD_SOURCE_DIR / "RainWorldRL.csproj"
     if not project.is_file():
         return None
     h = hashlib.sha256()
-    for f in sorted(REPO_ROOT.glob("*.cs")) + [project]:
+    for f in sorted(MOD_SOURCE_DIR.glob("*.cs")) + [project]:
         h.update(f.name.encode())
         h.update(f.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
@@ -141,7 +141,7 @@ def _can_build() -> bool:
 
 def build(config: Optional[Config] = None, deploy: bool = True, configuration: str = BUILD_CONFIGURATION) -> Path:
     """
-    Run ``dotnet build -c <configuration> -p:RainWorldDir=<game_dir>`` in the repo root.
+    Run ``dotnet build -c <configuration> -p:RainWorldDir=<game_dir>`` in mod/.
 
     Args:
         deploy: Also copy the DLL into the plugins directory. Fails if the game
@@ -153,14 +153,14 @@ def build(config: Optional[Config] = None, deploy: bool = True, configuration: s
     """
     config = config or load_config()
     cmd = [
-        "dotnet", "build",
+        "dotnet", "build", str(MOD_SOURCE_DIR / "RainWorldRL.csproj"),
         "-c", configuration,
         f"-p:RainWorldDir={config.game_dir.as_posix()}",
         "-nologo",
     ]
     logger.info("Building mod: %s", " ".join(cmd))
     try:
-        result = _run(cmd, cwd = REPO_ROOT, timeout = 600)
+        result = _run(cmd, cwd = MOD_SOURCE_DIR, timeout = 600)
     except FileNotFoundError as e:
         raise LaunchError("`dotnet` was not found on PATH; install the .NET SDK") from e
 
@@ -168,7 +168,7 @@ def build(config: Optional[Config] = None, deploy: bool = True, configuration: s
         output = (result.stdout + "\n" + result.stderr).strip().splitlines()
         raise LaunchError("dotnet build failed:\n" + "\n".join(output[-LOG_TAIL_LINES:]))
 
-    built = REPO_ROOT / "bin" / configuration / "net472" / "RainWorldRL.dll"
+    built = MOD_SOURCE_DIR / "bin" / configuration / "net472" / "RainWorldRL.dll"
     if not built.is_file():
         raise LaunchError(f"Build reported success but {built} does not exist")
     logger.info("Build succeeded: %s", built)
