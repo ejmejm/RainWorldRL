@@ -316,15 +316,29 @@ DISPLAY=":$display" "$@"
 """
 
 
+def _nvidia_gpu_usable() -> bool:
+    """
+    True if this process can open an NVIDIA GPU. Cluster nodes show the device files of all
+    their GPUs, but a job that was not allocated one is refused when it opens them.
+    """
+    for dev in Path("/dev").glob("nvidia[0-9]*"):
+        try:
+            os.close(os.open(dev, os.O_RDWR))
+            return True
+        except OSError:
+            pass
+    return False
+
+
 def resolve_renderer(config: Config) -> str:
     """
     ``config.renderer`` with ``auto`` resolved: ``virtualgl`` when an NVIDIA GPU
-    is visible, else ``wsl`` on WSL2, else ``cpu``. AMD/Intel GPUs stay on
+    is usable, else ``wsl`` on WSL2, else ``cpu``. AMD/Intel GPUs stay on
     ``cpu`` unless ``virtualgl`` is set explicitly (untested there).
     """
     if config.renderer != "auto":
         return config.renderer
-    if Path("/dev/nvidiactl").exists():
+    if _nvidia_gpu_usable():
         return "virtualgl"
     if Path("/dev/dxg").exists():
         return "wsl"

@@ -70,7 +70,7 @@ class Config:
         wine_prefix_dir: Linux only: holds one Wine prefix per game instance
             (hard-linked copies of a base prefix, created on first launch).
         renderer: Linux only: ``"auto"`` (default: ``virtualgl`` when an NVIDIA
-            GPU is visible, else ``wsl`` on WSL2, else ``cpu``), ``"cpu"`` (DXVK on
+            GPU is usable, else ``wsl`` on WSL2, else ``cpu``), ``"cpu"`` (DXVK on
             Mesa lavapipe), ``"wsl"`` (WSL2's GPU via Mesa d3d12) or ``"virtualgl"``
             (a GPU's EGL device via VirtualGL).
         source: The config file the values came from, or None for defaults.

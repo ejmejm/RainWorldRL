@@ -34,7 +34,7 @@ If the image isn't published yet, build it yourself:
 `docker build -t rainworld-rl container && apptainer build ~/.local/share/rainworld_rl/rainworld-rl.sif docker-daemon://rainworld-rl:latest`.
 
 On Linux the `renderer` config key picks how frames are drawn. The default `auto` uses `virtualgl`
-(the GPU, through VirtualGL) when an NVIDIA GPU is visible, `wsl` (WSL2's GPU) on WSL2, and `cpu`
+(the GPU, through VirtualGL) when the job can use an NVIDIA GPU, `wsl` (WSL2's GPU) on WSL2, and `cpu`
 (Mesa on the CPU) otherwise. A pip install ships a prebuilt mod DLL, so the .NET SDK is only needed
 to change the mod.
 
