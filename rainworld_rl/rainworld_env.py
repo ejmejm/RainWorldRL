@@ -18,18 +18,6 @@ This is a continual environment: a death is **not** a reset. ``terminated``
 and ``truncated`` are always False; ``info["player_dead"]`` is a one-step
 edge taken straight from the mod's status bit.
 
-Automatic restart (``auto_restart = True``, the default): when ``step()`` finds
-the game dead or hung (``GameNotRunningError`` / ``StepTimeoutError``), or
-``ready`` has been False for more than ``stuck_timeout`` (120 s wall time, F10
-override excluded; deaths, sleeps and region loads drop it for a few seconds),
-it kills and relaunches the game (``build = False``), waits for READY and
-returns the reloaded game's first frame with ``info["game_restarted"] = True``.
-The RL save is kept, so play continues from the last save (the game books an
-unfinished cycle as a death, so karma may drop), and the mod's
-``step_counter`` starts again from 0. After ``restart_attempts`` (3) failed
-relaunches in a row ``step()`` raises ``LaunchError``. ``reset()`` and
-``debug_kill()`` never restart.
-
 ``env.debug_kill()`` is a **debug/testing** hook that kills the slugcat on
 demand so the death -> respawn flow can be exercised deterministically. It is
 not part of the RL interface and is not something an agent should call.
@@ -40,7 +28,7 @@ Observation = RGB frame only. All other state is in ``info``:
 ``player_dead``, ``karma``, ``karma_cap``, ``food``, ``food_max``,
 ``player_pos`` (x, y), ``room_index``, ``cycle_number``, ``step_counter``,
 ``in_game``, ``ready``, ``human_override``, ``in_shelter``, ``cycle_survived``,
-``rain``, ``dialog_open``, ``cycle_progress``, ``game_restarted``.
+``rain``, ``dialog_open``, ``cycle_progress``.
 
 Actions
 -------
@@ -62,7 +50,6 @@ Registration
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Dict, Optional, Tuple
 
 import gymnasium as gym
@@ -76,8 +63,6 @@ from .shared_memory import (
     GameNotRunningError,
     ModState,
     SharedMemoryClient,
-    SharedMemoryError,
-    StepTimeoutError,
     action_to_bits,
     default_shm_path,
 )
@@ -104,12 +89,6 @@ class RainWorldEnv(gym.Env):
 
     metadata = {"render_modes": ["rgb_array"]}
 
-    # auto_restart: seconds ``ready`` may stay False (wall time, F10 override excluded)
-    # before step() treats the game as stuck and restarts it.
-    stuck_timeout: float = 120.0
-    # auto_restart: failed relaunches in a row before step() gives up and raises.
-    restart_attempts: int = 3
-
     def __init__(
         self,
         frame_width: int = 160,
@@ -117,14 +96,13 @@ class RainWorldEnv(gym.Env):
         ticks_per_step: int = 4,
         *,
         ready_timeout: float = 60.0,
-        frame_timeout: float = 60.0,
+        frame_timeout: float = 10.0,
         reset_timeout: float = 90.0,
         render_mode: Optional[str] = None,
         debug_timing: bool = False,
         config: Optional[Config] = None,
         client: Optional[SharedMemoryClient] = None,
         instance: int = 0,
-        auto_restart: bool = True,
     ):
         """
         Args:
@@ -134,8 +112,7 @@ class RainWorldEnv(gym.Env):
                 ticks/s, so the default 4 is 100 ms of game time per step).
             ready_timeout: Seconds ``connect()`` waits for the mod's READY bit.
             frame_timeout: Seconds ``step()`` waits for a frame (not counted
-                while the human override is active) before it restarts the
-                game (or raises, see ``auto_restart``).
+                while the human override is active).
             reset_timeout: Seconds ``reset()`` waits for the RESET command ack.
             render_mode: Only "rgb_array" is supported.
             debug_timing: Print per-phase step timing every ~2 s.
@@ -145,8 +122,6 @@ class RainWorldEnv(gym.Env):
                 inject a fake mapping). Normally None.
             instance: Which game instance to drive (Linux only; see
                 ``launcher``). Each has its own shared memory.
-            auto_restart: Let ``step()`` restart a dead, hung or stuck game
-                (see the module docstring). False: ``step()`` raises instead.
         """
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -162,7 +137,6 @@ class RainWorldEnv(gym.Env):
         self.debug_timing = debug_timing
         self.config = config
         self.instance = instance
-        self.auto_restart = auto_restart
 
         self.observation_space = spaces.Box(
             low = 0, high = 255, shape = (frame_height, frame_width, 3), dtype = np.uint8
@@ -174,7 +148,6 @@ class RainWorldEnv(gym.Env):
         )
         self._last_frame: Optional[np.ndarray] = None
         self._last_state: Optional[ModState] = None
-        self._not_ready_since: Optional[float] = None  # monotonic time READY was first seen down
         self._game_process = None
 
     # -- connection management ---------------------------------------------
@@ -284,7 +257,9 @@ class RainWorldEnv(gym.Env):
             self._client.reset_game(timeout = self.reset_timeout)
 
         frame, state = self._client.step(0, self.ticks_per_step, timeout = self.frame_timeout)
-        return frame, self._observe(frame, state)
+        self._last_frame = frame
+        self._last_state = state
+        return frame, state.to_info()
 
     def step(self, action) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         """
@@ -298,62 +273,19 @@ class RainWorldEnv(gym.Env):
             observation: RGB frame.
             reward: Always 0.0 (reward shaping is left to the user).
             terminated / truncated: Always False (continual environment).
-            info: See module docstring. ``info["game_restarted"]`` is True on
-                the step that restarted the game, False otherwise.
+            info: See module docstring.
 
         Raises:
-            StepTimeoutError / GameNotRunningError: the mod stopped answering
-                (only with ``auto_restart = False``).
-            LaunchError: ``restart_attempts`` relaunches in a row failed.
+            StepTimeoutError / GameNotRunningError: the mod stopped answering.
         """
         if not self.connected:
             raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
 
         bits = action_to_bits(action)
-        try:
-            frame, state = self._client.step(bits, self.ticks_per_step, timeout = self.frame_timeout)
-        except (StepTimeoutError, GameNotRunningError) as e:
-            if not self.auto_restart:
-                raise
-            return self._restart_game(f"{type(e).__name__}: {e}")
-        info = self._observe(frame, state)
-        if self.auto_restart and self._not_ready_since is not None:
-            down = time.monotonic() - max(self._not_ready_since, self._client.last_override_time)
-            if down > self.stuck_timeout:
-                return self._restart_game(f"ready has been False for {down:.0f}s (stuck in a screen?)")
-        return frame, 0.0, False, False, info
-
-    def _observe(self, frame: np.ndarray, state: ModState, restarted: bool = False) -> Dict[str, Any]:
-        """Remember the frame and state, track since when READY is down, build ``info``."""
+        frame, state = self._client.step(bits, self.ticks_per_step, timeout = self.frame_timeout)
         self._last_frame = frame
         self._last_state = state
-        if state.ready or state.human_override:
-            self._not_ready_since = None
-        elif self._not_ready_since is None:
-            self._not_ready_since = time.monotonic()
-        info = state.to_info()
-        info["game_restarted"] = restarted
-        return info
-
-    def _restart_game(self, cause: str) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """Relaunch the game (RL save kept), wait for READY and return a no-op step as ``step()`` would."""
-        from .launcher import LaunchError
-
-        logger.warning("Restarting the game: %s", cause)
-        start = time.monotonic()
-        for attempt in range(1, self.restart_attempts + 1):
-            try:
-                self.launch(build = False)  # restart = True kills the old game first
-                frame, state = self._client.step(0, self.ticks_per_step, timeout = self.frame_timeout)
-            except (LaunchError, SharedMemoryError) as e:
-                error = e
-                logger.warning("Restart attempt %d/%d failed: %s", attempt, self.restart_attempts, e)
-                continue
-            logger.info("Game restarted in %.0fs", time.monotonic() - start)
-            return frame, 0.0, False, False, self._observe(frame, state, restarted = True)
-        raise LaunchError(
-            f"Could not restart the game ({cause}): {self.restart_attempts} attempts failed, last: {error}"
-        ) from error
+        return frame, 0.0, False, False, state.to_info()
 
     def render(self) -> Optional[np.ndarray]:
         if self.render_mode == "rgb_array":

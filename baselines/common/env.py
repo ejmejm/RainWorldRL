@@ -129,7 +129,6 @@ class FakeRainWorldEnv(gym.Env):
             "ready": ready,
             "human_override": False,
             "region": "SU" if ready else "",
-            "game_restarted": False,
         }
 
     # -- gym API -------------------------------------------------------------
