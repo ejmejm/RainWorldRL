@@ -493,6 +493,10 @@ def _kill_game_linux(timeout: float, instance: int) -> bool:
         return False
     logger.info("Killing game instance %d (process group %d)", instance, pgid)
     os.killpg(pgid, signal.SIGTERM)
+    try:
+        os.killpg(pgid, signal.SIGCONT)  # a stopped (hung) game only acts on SIGTERM once continued
+    except ProcessLookupError:
+        pass
     deadline = time.monotonic() + timeout
     while _linux_game_pgid(instance) is not None:
         if time.monotonic() >= deadline:
