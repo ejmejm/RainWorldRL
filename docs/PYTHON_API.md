@@ -9,17 +9,12 @@ the .NET SDK is only needed to change the mod.
 
 ## Importing
 
-The repository directory *is* the package (`rainworld_rl`) and the code lives
-in its `python` subpackage, so the **parent** of the repo must be on
-`sys.path` (e.g. `E:/projects` for `E:/projects/rainworld_rl`):
-
 ```python
-import sys; sys.path.insert(0, "E:/projects")      # or set PYTHONPATH
 from rainworld_rl import RainWorldEnv, GameNotRunningError
 ```
 
-`gym.make("RainWorld-v0")` works once `rainworld_rl.rainworld_env` has
-been imported (registration happens at import time with entry point
+`gym.make("RainWorld-v0")` works once `rainworld_rl` has been imported
+(registration happens at import time with entry point
 `rainworld_rl.rainworld_env:RainWorldEnv`).
 
 ## Quick start
