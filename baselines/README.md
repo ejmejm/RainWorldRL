@@ -112,13 +112,9 @@ All CLI args are logged as params, plus `run_id`, `ckpt_dir`, `param_count`,
   the trainer only relies on the scalar reward and the `info["reward_terms"]`
   dict (logged per component). `--reward_scale` multiplies the reward before
   GAE.
-* **CPU JAX on Windows.** There is no CUDA jaxlib for native Windows, so JAX
-  runs on CPU here; with one env instance at a few hundred steps/s the game is
-  the bottleneck, not the network (the ~0.4M-parameter CNN update over 1024
-  steps takes a few seconds). GPU JAX needs Linux/WSL, but the env is
-  Windows-only (named shared memory + `RainWorld.exe`), so running the learner
-  on a GPU would mean splitting actor (Windows) and learner (Linux) across
-  processes - not done here.
+* **JAX on CPU or GPU.** There is no CUDA jaxlib for native Windows, so there
+  JAX runs on CPU. The env also runs on Linux and WSL2 (see the top-level
+  README), where the learner can use a GPU build of JAX.
 * **Checkpoints.** `eqx.tree_serialise_leaves` every `--ckpt_interval` env
   steps (and at the end / on Ctrl-C) into `baselines/ppo/checkpoints/<run_id>/`,
   next to a `model_config.json` that `play.py` uses to rebuild the model and

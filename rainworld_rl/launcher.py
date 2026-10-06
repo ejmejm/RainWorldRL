@@ -23,6 +23,7 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import shutil
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 GAME_PROCESS_NAME = "RainWorld.exe"
 BUILD_CONFIGURATION = "Debug"
 BUILT_DLL_RELATIVE = Path("bin") / BUILD_CONFIGURATION / "net472" / "RainWorldRL.dll"
+# The prebuilt mod shipped with the package, so a pip install needs no .NET SDK. build() refreshes it
+# whenever the mod sources change; SOURCE_HASH records which sources it was built from.
+PACKAGED_DLL = Path(__file__).resolve().parent / "mod" / "RainWorldRL.dll"
+PACKAGED_HASH = PACKAGED_DLL.with_name("SOURCE_HASH")
 LOG_TAIL_LINES = 40
 
 _SUBPROCESS_FLAGS = {}
@@ -117,6 +122,22 @@ def _run(
 # Build / deploy
 # ---------------------------------------------------------------------------
 
+def mod_source_hash() -> Optional[str]:
+    """sha256 of the mod sources (line endings normalised), or None outside a source checkout."""
+    project = REPO_ROOT / "RainWorldRL.csproj"
+    if not project.is_file():
+        return None
+    h = hashlib.sha256()
+    for f in sorted(REPO_ROOT.glob("*.cs")) + [project]:
+        h.update(f.name.encode())
+        h.update(f.read_bytes().replace(b"\r\n", b"\n"))
+    return h.hexdigest()
+
+
+def _can_build() -> bool:
+    return mod_source_hash() is not None and shutil.which("dotnet") is not None
+
+
 def build(config: Optional[Config] = None, deploy: bool = True, configuration: str = BUILD_CONFIGURATION) -> Path:
     """
     Run ``dotnet build -c <configuration> -p:RainWorldDir=<game_dir>`` in the repo root.
@@ -151,6 +172,13 @@ def build(config: Optional[Config] = None, deploy: bool = True, configuration: s
         raise LaunchError(f"Build reported success but {built} does not exist")
     logger.info("Build succeeded: %s", built)
 
+    source_hash = mod_source_hash()
+    if not PACKAGED_HASH.is_file() or PACKAGED_HASH.read_text().strip() != source_hash:
+        PACKAGED_DLL.parent.mkdir(exist_ok = True)
+        shutil.copy2(built, PACKAGED_DLL)
+        PACKAGED_HASH.write_text(source_hash + "\n")
+        logger.info("Updated the packaged DLL %s (commit it with the source change)", PACKAGED_DLL)
+
     if deploy:
         return deploy_dll(config, built)
     return built
@@ -161,11 +189,11 @@ build_mod = build
 
 
 def deploy_dll(config: Optional[Config] = None, built_dll: Optional[Path] = None) -> Path:
-    """Copy the built DLL into ``<game_dir>/BepInEx/plugins``."""
+    """Copy ``built_dll`` (default: the packaged prebuilt DLL) into ``<game_dir>/BepInEx/plugins``."""
     config = config or load_config()
-    built_dll = built_dll or (REPO_ROOT / BUILT_DLL_RELATIVE)
+    built_dll = built_dll or PACKAGED_DLL
     if not built_dll.is_file():
-        raise LaunchError(f"Built DLL not found at {built_dll}; run build() first")
+        raise LaunchError(f"Mod DLL not found at {built_dll}; run build() first")
     if not config.plugins_dir.is_dir():
         raise LaunchError(
             f"Plugins directory not found: {config.plugins_dir}. Is BepInEx installed and game_dir correct?"
@@ -286,21 +314,37 @@ DISPLAY=":$display" "$@"
 """
 
 
+def resolve_renderer(config: Config) -> str:
+    """
+    ``config.renderer`` with ``auto`` resolved: ``virtualgl`` when an NVIDIA GPU
+    is visible, else ``wsl`` on WSL2, else ``cpu``. AMD/Intel GPUs stay on
+    ``cpu`` unless ``virtualgl`` is set explicitly (untested there).
+    """
+    if config.renderer != "auto":
+        return config.renderer
+    if Path("/dev/nvidiactl").exists():
+        return "virtualgl"
+    if Path("/dev/dxg").exists():
+        return "wsl"
+    return "cpu"
+
+
 def _in_container(config: Config, cmd: List[str]) -> List[str]:
     """Wrap ``cmd`` in ``apptainer exec`` when ``config.container`` is set."""
     if config.container is None:
         return cmd
     args = [a for d in (config.game_dir, config.wine_prefix_dir) for a in ("--bind", str(d))]
-    if config.renderer == "wsl":
+    renderer = resolve_renderer(config)
+    if renderer == "wsl":
         args += ["--bind", WSL_LIB_DIR, "--env", f"LD_LIBRARY_PATH={WSL_LIB_DIR}/lib"]
-    if config.renderer == "virtualgl" and Path("/dev/nvidiactl").exists():
+    if renderer == "virtualgl" and Path("/dev/nvidiactl").exists():
         args.append("--nv")  # bind the host's NVIDIA driver (its EGL library) into the container
     return ["apptainer", "exec", *args, "--pwd", str(config.game_dir), str(config.container), *cmd]
 
 
 def _renderer(config: Config) -> Tuple[Dict[str, str], List[str]]:
     """
-    Environment and command prefix for ``config.renderer``:
+    Environment and command prefix for the renderer (``resolve_renderer``):
 
     * ``cpu``: on the CPU: DXVK on Mesa lavapipe when the prefix has DXVK,
       else Wine's OpenGL on llvmpipe. Works everywhere.
@@ -310,11 +354,12 @@ def _renderer(config: Config) -> Tuple[Dict[str, str], List[str]]:
       proprietary driver, bound in with ``apptainer --nv``; AMD/Intel: Mesa
       on /dev/dri.
     """
-    if config.renderer == "wsl":
+    renderer = resolve_renderer(config)
+    if renderer == "wsl":
         if not Path("/dev/dxg").exists():
             raise LaunchError("renderer = 'wsl' needs WSL2's GPU device /dev/dxg")
         return {"GALLIUM_DRIVER": "d3d12", "WINEDLLOVERRIDES": WINED3D_OVERRIDES}, []
-    if config.renderer == "virtualgl":
+    if renderer == "virtualgl":
         # VGL_READBACK=none: don't copy every frame back to the CPU to show it on Xvfb. Nothing
         # looks at the display (the mod captures on the GPU), and the readback halves steps/s.
         return {"WINEDLLOVERRIDES": WINED3D_OVERRIDES, "VGL_READBACK": "none"}, ["vglrun", "-d", "egl"]
@@ -386,13 +431,12 @@ def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
     env["RAINWORLD_RL_SCREEN"] = XVFB_SCREEN
     env["RAINWORLD_RL_SHM"] = "Z:" + shm.replace("/", "\\")  # Wine maps / to drive Z:
     env["RAINWORLD_RL_SAVE_DIR"] = "C:\\rainworld_rl_save"  # inside this instance's prefix
-    env["RAINWORLD_RL_SMALL_WINDOW"] = "1"  # nobody watches the Xvfb window: skip full-size compositing while the agent plays
     renderer_env, wrapper = _renderer(config)
     env.update(renderer_env)
     env.setdefault("DXVK_LOG_PATH", "none")  # DXVK would write logs into the shared game dir; stderr still has them
     cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
     log_path = prefix.with_suffix(".log")
-    logger.info("Starting instance %d: %s (output in %s)", instance, config.exe_path, log_path)
+    logger.info("Starting instance %d (renderer %s): %s (output in %s)", instance, resolve_renderer(config), config.exe_path, log_path)
     with open(log_path, "wb") as log:
         try:
             process = subprocess.Popen(
@@ -497,7 +541,7 @@ def wait_for_ready(
 
 def launch(
     config: Optional[Config] = None,
-    build: bool = True,  # noqa: A002 - mirrors the CLI flag name
+    build: Optional[bool] = None,  # noqa: A002 - mirrors the CLI flag name
     restart: bool = True,
     timeout: Optional[float] = None,
     instance: int = 0,
@@ -506,7 +550,10 @@ def launch(
     Build (optional), (re)start the game and wait for the mod's heartbeat.
 
     Args:
-        build: Run ``dotnet build`` and deploy the DLL.
+        build: True: ``dotnet build`` and deploy the DLL. None (default): build
+            in a source checkout with ``dotnet`` on PATH, otherwise deploy the
+            prebuilt DLL shipped with the package. False: leave the deployed
+            DLL alone.
         restart: Kill a running game first. If False and the game is already
             running, nothing is started; we just wait for the mod to be alive.
         timeout: Seconds to wait for the mod heartbeat (default ``config.launch_timeout``).
@@ -523,7 +570,9 @@ def launch(
     config.validate_game_dir()
 
     built_dll = None
-    if build:
+    if build is None and not _can_build():
+        built_dll = PACKAGED_DLL
+    elif build is not False:
         built_dll = build_mod(config, deploy = False)
 
     process = None
@@ -531,11 +580,11 @@ def launch(
     if restart or not running:
         if running:
             kill_game(instance = instance)
-        if build:
+        if built_dll is not None:
             deploy_dll(config, built_dll)
         process = start_game(config, instance)
     else:
-        if build:
+        if built_dll is not None:
             logger.warning("Game is running and restart=False; deploying the DLL may fail if it is locked")
             deploy_dll(config, built_dll)
         logger.info("Game already running; attaching without restart")
@@ -558,7 +607,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog = "python -m rainworld_rl.launcher",
         description = "Build, deploy and launch Rain World with the RainWorldRL mod.",
     )
-    parser.add_argument("--no-build", action = "store_true", help = "Skip dotnet build / DLL deploy")
+    parser.add_argument("--no-build", action = "store_true", help = "Skip the build and leave the deployed DLL alone (default: build if possible, else deploy the packaged DLL)")
     parser.add_argument("--no-restart", action = "store_true", help = "Do not kill an already-running game")
     parser.add_argument("--build-only", action = "store_true", help = "Build and deploy, then exit")
     parser.add_argument("--wait-ready", action = "store_true", help = "After the mod is alive, also wait for READY")
@@ -592,7 +641,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Deployed {path}")
             return 0
 
-        launch(config, build = not args.no_build, restart = not args.no_restart, timeout = args.timeout, instance = args.instance)
+        launch(config, build = False if args.no_build else None, restart = not args.no_restart, timeout = args.timeout, instance = args.instance)
         if args.wait_ready:
             wait_for_ready(config, timeout = 1.0, instance = args.instance)
         print("Rain World is running with the RainWorldRL mod alive.")

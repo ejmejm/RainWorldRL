@@ -8,8 +8,9 @@ tests/
   e2e/               drive the real game; auto-marked `e2e`, skipped unless --e2e
 ```
 
-Requirements: Python 3.13, `pip install pytest numpy gymnasium` (see `python/requirements.txt`).
-Run from the repo root (`E:\projects\rainworld_rl`); `pytest.ini` there sets the test paths.
+Requirements: Python >= 3.11, `pip install -e . pytest`. Run from the repo root; `pytest.ini`
+there sets the test paths. On Linux the same commands work once `rainworld-rl setup` has written
+a config (the tests use its `game_dir`, `container` and `renderer`) and `apptainer` is on PATH.
 
 ## Running
 

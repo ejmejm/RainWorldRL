@@ -25,9 +25,11 @@ launch_timeout = 120.0
 # Linux only. One Wine prefix per game instance is kept here.
 # wine_prefix_dir = "~/.local/share/rainworld_rl/wine"
 
-# Linux only. How the game's OpenGL is rendered:
-#   "cpu"        Mesa llvmpipe on the CPU (default; works everywhere, slow)
+# Linux only. How the game is rendered:
+#   "auto"       default: "virtualgl" when an NVIDIA GPU is visible, else "wsl" on WSL2,
+#                else "cpu"
+#   "cpu"        DXVK on Mesa lavapipe, on the CPU (works everywhere)
 #   "wsl"        WSL2's GPU through Mesa's d3d12 driver
 #   "virtualgl"  a GPU's EGL device through VirtualGL (NVIDIA proprietary driver,
-#                bound in with apptainer --nv; AMD/Intel via Mesa on /dev/dri)
-# renderer = "cpu"
+#                bound in with apptainer --nv; AMD/Intel via Mesa on /dev/dri, untested)
+# renderer = "auto"
