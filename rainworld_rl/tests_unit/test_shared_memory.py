@@ -518,7 +518,7 @@ def test_env_reset_sends_reset_and_returns_frame_and_info():
         "player_dead", "karma", "karma_cap", "food", "player_pos", "room_index",
         "cycle_number", "step_counter", "in_game", "ready", "human_override",
         "food_max", "in_shelter", "cycle_survived", "rain", "dialog_open", "cycle_progress",
-        "food_to_hibernate", "malnourished", "region",
+        "food_to_hibernate", "malnourished", "region", "game_restarted",
     }
     assert info["region"] == "SU"
     assert env.connected
