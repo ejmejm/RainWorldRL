@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.harness import LEFT, NOOP, RIGHT
+from rainworld_rl import KEY_LEFT, KEY_RIGHT
 
 # Steps (1 tick each) bound for one leg of a hop: the next room loads (usually already realized as a neighbour),
 # then the slugcat crosses the pipe. Both take a few to a few dozen ticks.
@@ -14,7 +14,7 @@ MAX_REGION_STEPS = 3000
 
 def _step_until(env, pred, max_steps, what):
     for _ in range(max_steps):
-        info = env.step(NOOP)[4]
+        info = env.step(0)[4]
         if pred(info):
             return info
     raise AssertionError(f"{what} not within {max_steps} steps; last {info}")
@@ -27,7 +27,7 @@ def _out_of_pipe(env, info):
 
 
 def _hop(env, exit):
-    before = env.step(NOOP)[4]
+    before = env.step(0)[4]
     env.unwrapped.debug_hop_room(exit)
     moved = _step_until(env, lambda i: i["room_index"] != before["room_index"], MAX_HOP_STEPS,
                         f"room change from {before['region']}/{before['room_index']}")
@@ -42,8 +42,8 @@ def _assert_playable(env):
     Right after coming out of a pipe: alive, READY and taking input. Walks on the way the pipe spat the slugcat out,
     so it does not walk back into that pipe (the next command would find it between rooms).
     """
-    a, b = env.step(NOOP)[4], env.step(NOOP)[4]
-    walk = LEFT if b["player_pos"][0] < a["player_pos"][0] else RIGHT
+    a, b = env.step(0)[4], env.step(0)[4]
+    walk = KEY_LEFT if b["player_pos"][0] < a["player_pos"][0] else KEY_RIGHT
     infos = [env.step(walk)[4] for _ in range(20)]
     assert all(i["ready"] and not i["player_dead"] for i in infos), infos[-1]
     assert len({i["player_pos"] for i in infos}) > 1, infos[-1]
@@ -51,7 +51,7 @@ def _assert_playable(env):
 
 def test_room_hops(env):
     """Five hops in a row each land in a different room of the same region, READY all along."""
-    rooms = [env.step(NOOP)[4]["room_index"]]
+    rooms = [env.step(0)[4]["room_index"]]
     for exit in range(5):
         info = _hop(env, exit)
         assert info["room_index"] != rooms[-1], info
@@ -65,7 +65,7 @@ def test_switch_region_then_hops(env):
     SWITCH_REGION: the region changes once the next world has loaded, then the slugcat leaves the gate room into the
     new region and takes input again; two hops there stay in the new region.
     """
-    start = env.step(NOOP)[4]
+    start = env.step(0)[4]
     env.unwrapped.debug_switch_region()
     switched = _step_until(env, lambda i: i["region"] != start["region"], MAX_REGION_STEPS, "region change")
     left_gate = _step_until(env, lambda i: i["room_index"] != switched["room_index"], MAX_HOP_STEPS, "leaving the gate room")

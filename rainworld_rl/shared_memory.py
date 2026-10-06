@@ -2,14 +2,15 @@
 Shared memory client for communicating with the Rain World RL mod.
 
 Implements protocol v4 as described in ``docs/PROTOCOL.md``. The mapping is a
-named memory-mapped file (``RainWorldRL``) consisting of a 64-byte header
-followed by an RGB24 frame of up to 1920x1080.
+named memory-mapped file (``RainWorldRL``) on Windows, or a /dev/shm file on
+Linux (``default_shm_path``) that the game maps under Wine. It consists of a
+64-byte header followed by an RGB24 frame of up to 1920x1080.
 
 Header layout (all little-endian)::
 
     Offset Size Dir     Field
     0      1    both    sync_flag       0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
-    1      1    -       reserved        (legacy v2 action byte, no longer used)
+    1      1    -       reserved
     2      1    py->mod ticks_per_step  1..255 (0 treated as 1)
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
@@ -90,7 +91,7 @@ SYNC_PROCESSING = 3
 
 # Header offsets
 OFFSET_SYNC_FLAG = 0
-# offset 1 is reserved (legacy v2 action byte; the mod no longer reads it)
+# offset 1 is reserved
 OFFSET_TICKS_PER_STEP = 2
 OFFSET_STATUS = 3
 OFFSET_WIDTH = 4
@@ -109,7 +110,7 @@ OFFSET_PLAYER_X = 28
 OFFSET_PLAYER_Y = 32
 OFFSET_ROOM_INDEX = 36
 OFFSET_CYCLE_NUMBER = 40
-OFFSET_ACTION_BITS = 44       # py->mod uint32, protocol v3 action bitfield (see PROTOCOL.md)
+OFFSET_ACTION_BITS = 44       # py->mod uint32, one bit per held key (see PROTOCOL.md)
 OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FOOD_TO_HIBERNATE = 52 # mod->py uint8
 OFFSET_MALNOURISHED = 53      # mod->py uint8 (0/1)
@@ -166,7 +167,7 @@ COMMAND_RESULT_PENDING = 0
 COMMAND_RESULT_OK = 1
 COMMAND_RESULT_ERROR = 2
 
-# game_flags (offset 14, mod-owned, protocol v3)
+# game_flags (offset 14, mod-owned)
 GAME_FLAG_IN_SHELTER = 0x01      # level: player is inside a shelter room
 GAME_FLAG_CYCLE_SURVIVED = 0x02  # edge: hibernated with enough food during this step (a starving sleep does not count)
 GAME_FLAG_RAIN = 0x04            # level: the cycle timer has expired and the lethal rain is falling
@@ -177,7 +178,7 @@ GAME_FLAG_DIALOG_OPEN = 0x08     # level: an in-game text/dialog overlay awaits 
 HEADER_STRUCT = struct.Struct(
     "<"
     "B"    # sync_flag
-    "x"    # reserved (legacy action byte)
+    "x"    # reserved
     "B"    # ticks_per_step
     "B"    # status
     "I"    # frame_width
@@ -543,7 +544,6 @@ class SharedMemoryClient:
         self,
         frame_width: int = 160,
         frame_height: int = 90,
-        debug_timing: bool = False,
         mapping_factory: Optional[Callable[[], Any]] = None,
         shm_path: Optional[str] = None,
     ):
@@ -551,7 +551,6 @@ class SharedMemoryClient:
         Args:
             frame_width: Desired frame width in pixels (1..1920).
             frame_height: Desired frame height in pixels (1..1080).
-            debug_timing: If True, print per-phase timing info every ~2 s.
             mapping_factory: Callable returning a mapping object (see module
                 docstring). Defaults to opening the real named mapping. Used
                 by unit tests to inject an in-memory fake.
@@ -564,20 +563,11 @@ class SharedMemoryClient:
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.frame_size = frame_width * frame_height * 3
-        self.debug_timing = debug_timing
         self._mapping_factory = mapping_factory or open_mapping
 
         self._shm: Optional[Any] = None
         self._connected = False
         self._override_logged = False
-
-        # Timing stats
-        self._timing_samples = 0
-        self._send_action_time = 0.0
-        self._wait_poll_time = 0.0
-        self._read_frame_time = 0.0
-        self._reset_flag_time = 0.0
-        self._last_timing_log = time.time()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -759,12 +749,6 @@ class SharedMemoryClient:
             raise NotConnectedError("Mapping is not open")
         return ModState.unpack(self._shm[0:HEADER_SIZE])
 
-    def read_status(self) -> int:
-        """Read the raw status byte."""
-        if self._shm is None:
-            raise NotConnectedError("Mapping is not open")
-        return self._read_byte(OFFSET_STATUS)
-
     def set_connected(self, value: bool) -> None:
         """Read-modify-write Python's ``CONNECTED`` bit, leaving the mod's bits intact."""
         status = self._read_byte(OFFSET_STATUS)
@@ -838,11 +822,9 @@ class SharedMemoryClient:
     def send_action_bits(self, action_bits: int, ticks_per_step: int = 1) -> None:
         """Write a pre-encoded ``action_bits`` mask (offset 44) and signal ``ACTION_READY``."""
         self._require_connected()
-        send_start = time.perf_counter()
         self._write_uint32(OFFSET_ACTION_BITS, int(action_bits) & KEY_ALL_MASK)
         self._write_byte(OFFSET_TICKS_PER_STEP, max(1, min(255, int(ticks_per_step))))
         self._write_byte(OFFSET_SYNC_FLAG, SYNC_ACTION_READY)
-        self._send_action_time += time.perf_counter() - send_start
 
     def send_keys(self, *names: str, ticks_per_step: int = 1) -> None:
         """Convenience: ``send_keys("right", "jump")``."""
@@ -866,23 +848,14 @@ class SharedMemoryClient:
             GameNotRunningError: no frame and the heartbeat did not advance either.
         """
         self._require_connected()
-        poll_start = time.perf_counter()
         deadline = time.monotonic() + timeout
         state = self.read_state()
         start_heartbeat = state.heartbeat
 
         while True:
             if state.sync_flag == SYNC_FRAME_READY:
-                self._wait_poll_time += time.perf_counter() - poll_start
                 frame = self._read_frame()
-
-                reset_start = time.perf_counter()
                 self._write_byte(OFFSET_SYNC_FLAG, SYNC_IDLE)
-                self._reset_flag_time += time.perf_counter() - reset_start
-
-                self._timing_samples += 1
-                if self.debug_timing and time.time() - self._last_timing_log >= 2.0:
-                    self._log_timing()
                 return frame, state
 
             if state.human_override:
@@ -919,13 +892,11 @@ class SharedMemoryClient:
             state = self.read_state()
 
     def _read_frame(self) -> np.ndarray:
-        read_start = time.perf_counter()
         view = np.frombuffer(
             self._shm, dtype = np.uint8, count = self.frame_size, offset = OFFSET_FRAME_DATA
         )
         frame = view.reshape((self.frame_height, self.frame_width, 3)).copy()
         del view  # release the buffer export on the mapping
-        self._read_frame_time += time.perf_counter() - read_start
         return frame
 
     def step(self, action = 0, ticks_per_step: int = 1, timeout: float = 10.0) -> Tuple[np.ndarray, ModState]:
@@ -964,7 +935,7 @@ class SharedMemoryClient:
             time.sleep(self.slow_poll_interval)
 
         if state.command_result == COMMAND_RESULT_ERROR:
-            raise CommandError(f"Mod reported an error executing command {command}; see BepInEx/LogOutput.log")
+            raise CommandError(f"Mod reported an error executing command {command}; see the game log (launcher.game_log_path)")
         return state.command_result
 
     def reset_game(self, timeout: float = 60.0) -> ModState:
@@ -981,115 +952,25 @@ class SharedMemoryClient:
         return self.read_state()
 
     def kill_player(self, timeout: float = 10.0) -> ModState:
-        """
-        Send ``KILL_PLAYER`` - a **debug/testing** command that kills player 0.
-
-        The mod applies the kill synchronously and acks as soon as the slugcat
-        is dead; it does *not* wait for the respawn. The next ``step()`` reports
-        the ``PLAYER_DEAD`` edge, then (after the game's ~40-tick game-over
-        prompt) the mod skips the death screen and reloads the cycle, during
-        which ``READY`` drops and steps return menu/loading frames.
-
-        Raises:
-            CommandError: the mod reported ERROR (RL mode not fully on, no live
-                player 0, player already dead) or did not ack within ``timeout``.
-        """
+        """Debug/testing only: send ``KILL_PLAYER`` (kill player 0; see docs/PROTOCOL.md)."""
         self._require_connected()
         self.send_command(COMMAND_KILL_PLAYER, timeout = timeout)
         return self.read_state()
 
     def enter_shelter(self, food: int, timeout: float = 10.0) -> ModState:
-        """
-        Send ``ENTER_SHELTER`` - a **debug/testing** command: set player 0's
-        food to ``food`` pips (clamped to its maximum) and send it into its den
-        shelter (the shelter it last woke up in, or the slugcat's default one)
-        through the shelter's entrance pipe, as if it had walked in.
-
-        The mod acks at once; the arrival and any sleep are observed through
-        later steps. With ``food_to_hibernate`` pips the game hibernates the
-        slugcat once it stands still away from the entrance (fed sleep); with
-        fewer it sleeps starving if DOWN is held for 260 ticks there.
-
-        Raises:
-            CommandError: the mod reported ERROR (RL mode not fully on, no live
-                player 0, den shelter not in the current region) or did not ack
-                within ``timeout``.
-        """
+        """Debug/testing only: send ``ENTER_SHELTER`` (den shelter with ``food`` pips; see docs/PROTOCOL.md)."""
         self._require_connected()
         self.send_command(COMMAND_ENTER_SHELTER, timeout = timeout, arg = food)
         return self.read_state()
 
     def hop_room(self, exit: int, timeout: float = 10.0) -> ModState:
-        """
-        Send ``HOP_ROOM`` - a **debug/testing** command: send player 0 out
-        through one of its room's exits into the neighbouring room, as if it
-        had walked into that pipe. ``exit`` (0-255) picks the exit:
-        ``exit % n`` of the room's ``n`` usable exits (exits that lead
-        nowhere are skipped), so a seeded RNG gives reproducible routes.
-
-        The mod acks once the slugcat is in the pipe; ``ready`` stays up.
-        ``room_index`` changes once the next room has loaded and the slugcat
-        is in its pipe (usually within a few steps), and it comes out of the
-        pipe a few steps later.
-
-        Raises:
-            CommandError: the mod reported ERROR (RL mode not fully on, no live
-                player 0 in a room, already on its way out of the room or
-                through a region switch, no usable exit) or did not ack within
-                ``timeout``.
-        """
+        """Debug/testing only: send ``HOP_ROOM`` (through exit ``exit`` into the next room; see docs/PROTOCOL.md)."""
         self._require_connected()
         self.send_command(COMMAND_HOP_ROOM, timeout = timeout, arg = exit)
         return self.read_state()
 
     def switch_region(self, gate: int = 0, timeout: float = 10.0) -> ModState:
-        """
-        Send ``SWITCH_REGION`` - a **debug/testing** command: take player 0
-        through a region gate of its region into the neighbouring region with
-        the game's own gate logic (karma requirement skipped). ``gate``
-        (0-255) picks the gate: ``gate % n`` of the region's ``n`` usable
-        gates.
-
-        The mod acks once the slugcat is on its way to the gate room. It then
-        holds still (input is ignored) while the gate starts and the next
-        region loads; ``region`` changes when the world has loaded, and the
-        slugcat then leaves the gate room into the new region, after which it
-        takes input again. Other debug moves are rejected until then.
-
-        Raises:
-            CommandError: the mod reported ERROR (as for ``hop_room``, or the
-                region has no usable gate) or did not ack within ``timeout``.
-        """
+        """Debug/testing only: send ``SWITCH_REGION`` (through gate ``gate`` into the next region; see docs/PROTOCOL.md)."""
         self._require_connected()
         self.send_command(COMMAND_SWITCH_REGION, timeout = timeout, arg = gate)
         return self.read_state()
-
-    # -- misc --------------------------------------------------------------
-
-    def get_status(self) -> Tuple[bool, bool]:
-        """Backwards-compatible helper returning ``(player_dead, connected)``."""
-        if not self.is_connected():
-            return False, False
-        status = self.read_status()
-        return bool(status & STATUS_PLAYER_DEAD), bool(status & STATUS_CONNECTED)
-
-    def _log_timing(self) -> None:
-        if self._timing_samples == 0:
-            return
-        n = self._timing_samples
-        total = (self._send_action_time + self._wait_poll_time +
-                 self._read_frame_time + self._reset_flag_time)
-        print(f"[SharedMemory] TIMING (avg over {n} steps):")
-        print(f"  SendAction:   {self._send_action_time * 1000 / n:.3f}ms")
-        print(f"  WaitPoll:     {self._wait_poll_time * 1000 / n:.3f}ms")
-        print(f"  ReadFrame:    {self._read_frame_time * 1000 / n:.3f}ms")
-        print(f"  ResetFlag:    {self._reset_flag_time * 1000 / n:.3f}ms")
-        if total > 0:
-            print(f"  TOTAL:        {total * 1000 / n:.3f}ms (max {n / total:.1f} FPS)")
-
-        self._timing_samples = 0
-        self._send_action_time = 0.0
-        self._wait_poll_time = 0.0
-        self._read_frame_time = 0.0
-        self._reset_flag_time = 0.0
-        self._last_timing_log = time.time()

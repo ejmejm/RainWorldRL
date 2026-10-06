@@ -4,7 +4,7 @@ Python client for the Rain World RL mod. Protocol details live in
 [PROTOCOL.md](PROTOCOL.md); this page covers day-to-day usage.
 
 Requirements: Windows or Linux (see the README's Quick start), Python >= 3.11,
-`numpy`, `gymnasium` (`pip install -e .`). The package ships a prebuilt mod DLL;
+`numpy`, `gymnasium` (installed with the package). The package ships a prebuilt mod DLL;
 the .NET SDK is only needed to change the mod.
 
 ## Importing
@@ -52,7 +52,7 @@ env.close()                  # detach; the game keeps running
 | `env.debug_switch_region(gate=0, timeout=10)` | **Debug/testing only**, for soak tests of region loading. Sends `SWITCH_REGION`: the mod sends the slugcat into gate room `gate % n` of its region's `n` usable gates and acks; from there the game's own gate code (karma requirement skipped) loads the next region. The slugcat ignores input until it is out of the gate room: `region` changes once the new world has loaded (tens of steps), then it leaves the gate room into the new region. `ready` stays True. A death respawns it in its shelter in the old region. |
 
 Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (10 s),
-`reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`,
+`reset_timeout` (90 s), `render_mode="rgb_array"`, `config`,
 `instance` (Linux: which of several games running side by side to drive).
 
 ### Reset semantics
@@ -152,14 +152,14 @@ to override).
 |------|----------|-------|
 | `NewRoom` | `weight = 1.0` | first entry into each `(region, room_index)`; persists across deaths, clears on `reset()` |
 | `Food` | `below = 0.3, above = 0.1, satiety_decay = 0.5, recovery_steps = nominal cycle` | per pip gained, x the room's satiety factor (x0.5 per pip eaten there, recovers linearly over `recovery_steps` real steps) |
-| `Sleep` | `weight = 1.0, full_belly_per_pip = 0.25` | on `cycle_survived`: `weight * min(1, steps_awake / nominal_cycle_steps) + 0.25 * max(0, food - food_to_hibernate)`; a starving sleep earns nothing |
+| `Sleep` | `weight = 1.0, full_belly_per_pip = 0.25, tiredness_power = 2.0` | on `cycle_survived`: `tiredness * (weight + full_belly_per_pip * max(0, food - food_to_hibernate))`, `tiredness = min(1, steps_awake / nominal_cycle_steps) ** tiredness_power`; a starving sleep earns nothing |
 | `Death` | `weight = -3.0` | the step `player_dead` is True |
 | `Malnourished` | `per_step = -0.0003` | every ready step while `malnourished` |
 
 Weights are keyword arguments: `DriveReward(env, death = -1.0, food_below = 0.5,
 full_belly_per_pip = 0.0, ...)` (`new_room`, `food_below`, `food_above`,
-`satiety_decay`, `recovery_steps`, `sleep`, `full_belly_per_pip`, `death`,
-`malnourished`).
+`satiety_decay`, `recovery_steps`, `sleep`, `full_belly_per_pip`, `tiredness_power`,
+`death`, `malnourished`).
 
 Alternatives are composed from `RewardTerm`s, each called as
 `term(prev_info, info) -> float` once per step and `term.reset(info)` on
@@ -271,9 +271,8 @@ Copy `rainworld_rl.example.toml` to `rainworld_rl.toml` at the repo root (it
 is git-ignored) and edit:
 
 ```toml
-game_dir = "Z:/SteamLibrary/steamapps/common/Rain World"
+game_dir = "C:/path/to/Rain World"
 launch_timeout = 120.0
-# rl_save_dir = "..."   # informational; the mod decides where the save lives
 ```
 
 Lookup order: explicit `load_config(path)` argument > `$RAINWORLD_RL_CONFIG` >
@@ -281,8 +280,7 @@ Lookup order: explicit `load_config(path)` argument > `$RAINWORLD_RL_CONFIG` >
 `rainworld-rl setup`) > defaults. Linux-only keys: `container` (the Apptainer
 image), `wine_prefix_dir` and `renderer` (`auto`, `cpu`, `wsl`, `virtualgl`; see
 `rainworld_rl.example.toml`). Derived from `game_dir`: `exe_path`,
-`plugins_dir`, `plugin_dll_path`, `bepinex_log`. `build.ps1` reads `game_dir`
-from the same file.
+`plugins_dir`, `plugin_dll_path`, `bepinex_log`.
 
 ```python
 from rainworld_rl import load_config
@@ -308,20 +306,19 @@ under Wine on its own Xvfb display; `--instance N` runs several side by side.
 ## Smoke test
 
 ```
-python -m rainworld_rl.test_env            # connect to a running game, RESET, 1000 random key combos
-python -m rainworld_rl.test_env --launch   # build + restart the game first
-python -m rainworld_rl.test_env --no-wipe  # attach without resetting
-python -m rainworld_rl.test_env --discrete # sample from the Discrete(18) wrapper instead
+rainworld-rl doctor                                      # launch, reset, time 500 random steps, kill the game
+rainworld-rl doctor --steps 2000 --ticks 1 --instance 1  # longer run, 1 tick/step, instance 1 (Linux)
 ```
 
-Prints the `info` fields every 100 steps, a line whenever `player_dead`
-fires, and at the end how often each key was held (plus the most common
-combinations, and the discrete action distribution with `--discrete`).
+Prints the config and game version (on Linux also the container and
+renderer), then the steps/s at 160x90.
 
 ## Low-level client
 
-`SharedMemoryClient(frame_width, frame_height, debug_timing=False,
-mapping_factory=None)` wraps the mapping directly:
+`SharedMemoryClient(frame_width=160, frame_height=90, mapping_factory=None,
+shm_path=None)` wraps the mapping directly. `shm_path` is the file-backed
+mapping used on Linux (`default_shm_path(instance)`, a `/dev/shm` file); None
+opens the named Windows mapping.
 
 - `connect(wait_ready=True, ready_timeout=60, liveness_timeout=2, alive_grace=None)` / `disconnect()` - while `MOD_ALIVE` is set a stalled heartbeat is tolerated for `alive_grace` seconds (default `alive_stall_grace` = 15 s: the game's initial load runs synchronously right after launch)
 - `wait_for_alive(timeout)`, `wait_for_ready(timeout)`
@@ -330,5 +327,5 @@ mapping_factory=None)` wraps the mapping directly:
 - `read_state() -> ModState` (whole 64-byte header via one `struct.Struct` read), `set_connected(bool)` (read-modify-write of Python's bit only)
 
 `mapping_factory` lets tests inject a `bytearray`-backed fake; see
-`rainworld_rl/tests_unit/`. Run the game-free tests with
-`python -m pytest rainworld_rl/tests_unit -q` (or everything game-free with `python -m pytest -q`).
+`tests/unit/`. Run the game-free tests with `python -m pytest -q` (e2e tests
+are skipped without `--e2e`).

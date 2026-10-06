@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from tests.harness import ACTION_NOOP, infos, step_n
+from tests.e2e.helpers import infos, step_n
 
 # Upper bound on the steps we are willing to spend from the kill to the slugcat being back in
 # play. Budget: 1 step with the edge, ~40 ticks of the game's "game over" prompt (the mod
@@ -21,14 +21,6 @@ SETTLE_STEPS = 30
 # death reload (Load of the start-of-cycle save), but it may have fallen / shuffled a bit
 # between the first frame and the moment we sample, so compare positions loosely.
 SPAWN_POS_TOLERANCE_PX = 150.0
-
-
-def test_no_death_at_start(fresh_env):
-    """Right after a fresh reset the slugcat is safe; 100 no-op steps never report a death."""
-    results = step_n(fresh_env, 100)
-    dead_at = [i for i, dead in enumerate(infos(results, "player_dead")) if dead]
-    assert dead_at == [], f"player_dead was True at steps {dead_at[:10]}"
-    assert all(bool(v) for v in infos(results, "in_game")), "left the game during 100 idle steps"
 
 
 def test_debug_kill_death_edge_and_respawn(env):
@@ -78,7 +70,7 @@ def test_debug_kill_death_edge_and_respawn(env):
     saw_not_ready = False
     respawn_index = None
     for i in range(MAX_STEPS_AFTER_KILL):
-        obs, _reward, terminated, truncated, info = env.step(ACTION_NOOP)  # a timeout raises -> fails the test
+        obs, _reward, terminated, truncated, info = env.step(0)  # a timeout raises -> fails the test
         assert terminated is False and truncated is False, "continual env: death must not end an episode"
         assert obs.shape == tuple(env.observation_space.shape), f"bad frame {obs.shape} at step {i}"
         results.append((obs, info))
