@@ -12,7 +12,7 @@ using System.IO.MemoryMappedFiles;
 ///   3   u8   status           shared bitfield; each side only writes its own bits
 ///   4   u32  frame_width      py->mod
 ///   8   u32  frame_height     py->mod
-///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER); mod clears when done
+///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER, 3 ENTER_SHELTER); mod clears when done
 ///   13  u8   command_result   mod->py (0 none, 1 OK, 2 ERROR)
 ///   14  u8   game_flags       mod->py (b0 IN_SHELTER, b1 CYCLE_SURVIVED edge, b2 RAIN, b3 DIALOG_OPEN)
 ///   15  u8   protocol_version mod->py PROTOCOL_VERSION, written as soon as the mapping exists
@@ -31,7 +31,8 @@ using System.IO.MemoryMappedFiles;
 ///   52  u8   food_to_hibernate mod->py pips needed to hibernate this cycle (= food_max while malnourished)
 ///   53  u8   malnourished     mod->py level: 1 while the save state is malnourished (last sleep was a starving one)
 ///   54  4B   region           mod->py ASCII region acronym of the active world (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
-///   58  6B   reserved
+///   58  u8   command_arg      py->mod argument of the command (ENTER_SHELTER: food pips), written before command
+///   59  5B   reserved
 ///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
@@ -56,6 +57,7 @@ public class SharedMemoryBridge : IDisposable
     public const byte CMD_NONE = 0;
     public const byte CMD_RESET = 1;
     public const byte CMD_KILL_PLAYER = 2;
+    public const byte CMD_ENTER_SHELTER = 3;
     public const byte RESULT_NONE = 0;
     public const byte RESULT_OK = 1;
     public const byte RESULT_ERROR = 2;
@@ -86,6 +88,7 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_FOOD_TO_HIBERNATE = 52;
     private const int OFFSET_MALNOURISHED = 53;
     private const int OFFSET_REGION = 54;
+    private const int OFFSET_COMMAND_ARG = 58;
     public const int REGION_SIZE = 4;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
@@ -203,6 +206,8 @@ public class SharedMemoryBridge : IDisposable
     }
 
     public byte ReadCommand() => accessor.ReadByte(OFFSET_COMMAND);
+
+    public byte ReadCommandArg() => accessor.ReadByte(OFFSET_COMMAND_ARG);
 
     public void WriteCommand(byte command) => accessor.Write(OFFSET_COMMAND, command);
 

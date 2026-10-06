@@ -53,6 +53,9 @@ using UnityEngine;
 ///
 /// KILL_PLAYER (debug command): <see cref="KillPlayer"/> calls Player.Die on a realized player 0 and
 /// the ordinary death flow above takes over. The ack only confirms the kill was applied.
+///
+/// ENTER_SHELTER (debug command): <see cref="EnterShelter"/> sets player 0's food and sends it through the
+/// entrance pipe of its den shelter; the game's own shelter logic then decides whether and how it sleeps.
 /// </summary>
 public class GameFlowController
 {
@@ -386,6 +389,65 @@ public class GameFlowController
             log?.LogWarning("[GameFlow] KILL_PLAYER: Player.Die() did not kill the player (invincibility?)");
             return false;
         }
+        return true;
+    }
+
+    /// <summary>
+    /// Debug ENTER_SHELTER command: sets player 0's food to <paramref name="food"/> pips and sends it into its den
+    /// shelter (SaveState.denPosition, or SaveState.GetFinalFallbackShelter while the den is not a shelter, e.g. on a
+    /// fresh save) through the entrance pipe: it leaves its room like Creature.SuckedIntoShortCut (Creature.cs:1050-1063)
+    /// and waits between rooms like a room exit (ShortcutHandler.cs:198-203), so the game loads the shelter, moves the
+    /// camera and spits it out of the entrance, clearing Player.stillInStartShelter (Player.cs:6963). The game's own
+    /// shelter logic (Player.cs:5719-5787) then decides the sleep. Returns false (caller reports ERROR) in the cases
+    /// <see cref="KillPlayer"/> does, or when the den shelter is not in the current region.
+    /// </summary>
+    public bool EnterShelter(RainWorld rw, int food)
+    {
+        ProcessManager pm = rw?.processManager;
+        if (state != FlowState.On || resetState != ResetState.None || !IsInStoryGame(pm))
+        {
+            log?.LogWarning("[GameFlow] ENTER_SHELTER rejected: RL mode not fully on, a RESET is in progress or no story game is current");
+            return false;
+        }
+
+        RainWorldGame game = (RainWorldGame)pm.currentMainLoop;
+        AbstractCreature abstractPlayer = GetPlayer0(pm);
+        Player player = abstractPlayer?.realizedCreature as Player;
+        if (player == null || player.room == null || player.dead || game.GameOverModeActive)
+        {
+            log?.LogWarning("[GameFlow] ENTER_SHELTER rejected: player 0 is not alive in a room");
+            return false;
+        }
+
+        SaveState save = game.GetStorySession.saveState;
+        AbstractRoom shelter = string.IsNullOrEmpty(save.denPosition) ? null : game.world.GetAbstractRoom(save.denPosition);
+        if (shelter == null || !shelter.shelter)
+            shelter = game.world.GetAbstractRoom(SaveState.GetFinalFallbackShelter(save.saveStateNumber));
+        if (shelter == null || !shelter.shelter)
+        {
+            log?.LogWarning($"[GameFlow] ENTER_SHELTER rejected: the den shelter is not in region {game.world.name}");
+            return false;
+        }
+
+        player.playerState.foodInStomach = Mathf.Clamp(food, 0, player.MaxFoodInStomach);
+        player.playerState.quarterFoodPoints = 0;
+        log?.LogInfo($"[GameFlow] ENTER_SHELTER: player 0 {player.room.abstractRoom.name} -> {shelter.name} with {player.FoodInStomach} food");
+
+        // A room script's controller stays with the room being left (e.g. the NullController of the fresh-save
+        // intro, RoomSpecificScript.cs:102, which would otherwise keep the agent's input away for good).
+        player.controller = null;
+        Room room = player.room;
+        foreach (AbstractPhysicalObject obj in abstractPlayer.GetAllConnectedObjects())
+        {
+            if (obj.realizedObject == null)
+                continue;
+            if (obj.realizedObject is Creature creature)
+                creature.inShortcut = true;
+            room.RemoveObject(obj.realizedObject);
+        }
+        // Node 0 is a shelter's entrance (Player.cs:5768).
+        game.shortcuts.betweenRoomsWaitingLobby.Add(
+            new ShortcutHandler.ShortCutVessel(new RWCustom.IntVector2(0, 0), player, shelter, 0) { entranceNode = 0 });
         return true;
     }
 

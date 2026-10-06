@@ -54,7 +54,7 @@ Helpers in `tests/harness.py`:
 
 - Launch with build: 30-90 s. `--no-build`: 15-45 s. `--no-launch` connect: < 5 s.
 - One step: a few ms up to ~50 ms; 200 no-op steps < 10 s typically (hard limit 120 s in the test).
-- `reset()`: 10-30 s. The suite currently performs 4 resets (test_reset x3, test_death x1).
+- `reset()`: 10-30 s. The suite currently performs 11 resets (test_reset x5, test_death x2, test_game_state x2, test_sleep x2).
 - Whole `--e2e` run after launch: roughly 1.5-3 minutes.
 
 ## Adding a test

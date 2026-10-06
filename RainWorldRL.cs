@@ -306,6 +306,24 @@ public class RainWorldRL : BaseUnityPlugin
             sharedMemory.WriteCommandResult(killed ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
             sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
         }
+        else if (command == SharedMemoryBridge.CMD_ENTER_SHELTER)
+        {
+            // Debug/testing aid: send player 0 into its den shelter with command_arg food pips and ack at once.
+            // The arrival and any sleep are observed through subsequent steps.
+            bool sent = false;
+            try
+            {
+                sent = gameFlow.EnterShelter(rainWorld, sharedMemory.ReadCommandArg());
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"ENTER_SHELTER failed: {ex}");
+            }
+            if (!sent)
+                Logger.LogWarning("ENTER_SHELTER command could not be applied; reporting ERROR");
+            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+        }
         else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
         {
             Logger.LogWarning($"Unknown command {command}; reporting ERROR");

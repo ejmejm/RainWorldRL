@@ -33,6 +33,8 @@ relaunches in a row ``step()`` raises ``LaunchError``. ``reset()`` and
 ``env.debug_kill()`` is a **debug/testing** hook that kills the slugcat on
 demand so the death -> respawn flow can be exercised deterministically. It is
 not part of the RL interface and is not something an agent should call.
+``env.debug_enter_shelter(food)`` is its counterpart for the sleep flow: it
+sends the slugcat into its den shelter so a real hibernation can be tested.
 
 Observation = RGB frame only. All other state is in ``info``:
 ``player_dead``, ``karma``, ``karma_cap``, ``food``, ``food_max``,
@@ -389,6 +391,29 @@ class RainWorldEnv(gym.Env):
             raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
         logger.info("Sending KILL_PLAYER (debug)...")
         self._client.kill_player(timeout = timeout)
+
+    def debug_enter_shelter(self, food: int, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: give the slugcat ``food`` pips and send it into
+        its den shelter through the entrance pipe (``ENTER_SHELTER``).
+
+        Intended for tests that need a real hibernation: from there the game's
+        own shelter logic decides. With ``info["food_to_hibernate"]`` pips the
+        slugcat hibernates once it stands still away from the entrance
+        (``cycle_survived`` edge, then the cycle reloads in the shelter); with
+        fewer (but at least one) it sleeps starving if DOWN is held for 260
+        ticks. Not part of the RL interface.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (not in a game, no live
+                player, den shelter not in the current region) or did not ack
+                within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.info("Sending ENTER_SHELTER (debug, food=%d)...", food)
+        self._client.enter_shelter(food, timeout = timeout)
 
     # -- knobs -------------------------------------------------------------
 
