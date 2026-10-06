@@ -97,7 +97,7 @@ class RainWorldEnv(gym.Env):
         self,
         frame_width: int = 160,
         frame_height: int = 90,
-        ticks_per_step: int = 1,
+        ticks_per_step: int = 4,
         *,
         ready_timeout: float = 60.0,
         frame_timeout: float = 10.0,
@@ -112,7 +112,8 @@ class RainWorldEnv(gym.Env):
         Args:
             frame_width: Observation width in pixels (1..1920).
             frame_height: Observation height in pixels (1..1080).
-            ticks_per_step: Physics ticks per ``step()`` (1..255).
+            ticks_per_step: Physics ticks per ``step()`` (1..255; the game runs 40
+                ticks/s, so the default 4 is 100 ms of game time per step).
             ready_timeout: Seconds ``connect()`` waits for the mod's READY bit.
             frame_timeout: Seconds ``step()`` waits for a frame (not counted
                 while the human override is active).
