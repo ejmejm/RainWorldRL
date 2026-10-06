@@ -49,13 +49,31 @@ env.close()                  # detach; the game keeps running
 | `env.launch(build=None, restart=True, wait_ready=True)` | **Heavy.** Build the mod if possible (source checkout with `dotnet`), else deploy the prebuilt DLL; kill a running game; start it (Windows: `RainWorld.exe` directly; Linux: under Wine, see `launcher`); wait for the mod heartbeat, then `connect()`. Raises `LaunchError` with the tail of the game log on failure. |
 | `env.connect(wait_ready=True)` | Attach to a running game: liveness check (heartbeat), set `CONNECTED`, optionally wait for `READY`. Raises `GameNotRunningError` if nothing is running. |
 | `env.reset(options={"wipe": True})` | Connects if needed, sends `RESET` (wipe RL save, fresh story game, wait for READY), then does one no-op step and returns `(frame, info)`. `options={"wipe": False}` skips the command and just returns the current frame of the game in progress (requires READY). |
-| `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. |
+| `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. Restarts a dead, hung or stuck game by itself (see below). |
 | `env.disconnect()` / `env.close()` | Clear `CONNECTED`; the mod hands the game back to normal play. Does not quit the game. |
 | `env.debug_kill(timeout=10)` | **Debug/testing only.** Sends `KILL_PLAYER`: the mod kills the slugcat immediately and acks; the respawn is observed through later `step()` calls (see below). Not part of the RL interface. |
 
-Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (10 s),
+Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (60 s),
 `reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`,
-`instance` (Linux: which of several games running side by side to drive).
+`instance` (Linux: which of several games running side by side to drive),
+`auto_restart` (True).
+
+### Automatic restart
+
+So that a long run survives the game crashing or hanging: with
+`auto_restart=True` (the default), when `step()` gets no frame within `frame_timeout`
+(`StepTimeoutError`), finds the heartbeat stopped (`GameNotRunningError`), or
+sees `ready` False for more than `env.stuck_timeout` (120 s wall time, F10
+override excluded; deaths, sleeps and region loads drop it for a few seconds),
+it kills and relaunches the game (`build=False`, config loaded like `launch()`),
+waits for `READY` and returns the reloaded game's first frame from that same
+call with `info["game_restarted"] == True`, logging a warning with the cause.
+The RL save is kept, so play continues from the last save, like a death reload
+without the `player_dead` edge (the game books the unfinished cycle as a death,
+so karma may drop). A restart takes ~20 s (Linux, WSL2). After
+`env.restart_attempts` (3) failed relaunches in a row `step()` raises
+`LaunchError`. `reset()` and `debug_kill()` never restart; `auto_restart=False`
+makes `step()` raise as before.
 
 ### Reset semantics
 
@@ -116,10 +134,11 @@ frame flag):
 | `cycle_survived` | bool | Edge: the player hibernated with enough food during this step (`+1` cycle, karma up). A starving sleep does not set it. |
 | `dialog_open` | bool | Level: an in-game text/dialog overlay awaits input. |
 | `region` | str | Region acronym of the active world (`"SU"`, `"HI"`, ...); `""` while unavailable. Room indices are unique only within a region, so key rooms by `(region, room_index)`. |
-| `step_counter` | int | Mod-side count of completed steps. |
+| `step_counter` | int | Mod-side count of completed steps; starts again from 0 after a game restart. |
 | `in_game` | bool | Main process is `RainWorldGame`. |
 | `ready` | bool | Mod is in RL mode with a live player; steps are fully serviced. |
 | `human_override` | bool | F10 override active (see below). |
+| `game_restarted` | bool | Set by the env, not the mod: True on the step that restarted the game (see Automatic restart), False otherwise. |
 
 When `ready` is `False` (menus, loading, death screen) the mod still answers
 steps with the current rendered frame so the agent never hangs; game-state
@@ -265,7 +284,10 @@ All protocol errors derive from `SharedMemoryError`:
 - `ProtocolVersionError` - on connect: the deployed mod DLL is from another version of the
   library (stale DLL). `launch()` redeploys the packaged mod; `rainworld-rl setup` installs it.
 
-`LaunchError` (from `launcher`) covers build/start failures.
+`step()` raises `GameNotRunningError` / `StepTimeoutError` only with
+`auto_restart=False`; by default it restarts the game instead (see Automatic
+restart) and raises `LaunchError` only when `restart_attempts` relaunches in a
+row failed. `LaunchError` (from `launcher`) also covers build/start failures.
 
 ## Configuration file
 
