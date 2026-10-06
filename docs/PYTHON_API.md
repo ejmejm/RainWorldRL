@@ -52,6 +52,7 @@ env.close()                  # detach; the game keeps running
 | `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. Restarts a dead, hung or stuck game by itself (see below). |
 | `env.disconnect()` / `env.close()` | Clear `CONNECTED`; the mod hands the game back to normal play. Does not quit the game. |
 | `env.debug_kill(timeout=10)` | **Debug/testing only.** Sends `KILL_PLAYER`: the mod kills the slugcat immediately and acks; the respawn is observed through later `step()` calls (see below). Not part of the RL interface. |
+| `env.debug_enter_shelter(food, timeout=10)` | **Debug/testing only.** Sends `ENTER_SHELTER`: the mod sets the slugcat's food to `food` pips and sends it into its den shelter through the entrance pipe, then acks; the game's own shelter logic decides the sleep (with `food_to_hibernate` pips: stand still away from the entrance -> `cycle_survived`; with fewer: hold `down` 260 ticks -> starving sleep). See docs/PROTOCOL.md "Commands" and `tests/e2e/test_sleep.py`. Not part of the RL interface. |
 
 Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (60 s),
 `reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`,

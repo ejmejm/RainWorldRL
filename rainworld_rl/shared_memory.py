@@ -14,7 +14,7 @@ Header layout (all little-endian)::
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
-    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug)
+    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug), 3 ENTER_SHELTER (debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
     14     1    mod->py game_flags      see GAME_FLAG_* bits
     15     1    mod->py protocol_version PROTOCOL_VERSION, written as soon as the mapping exists (0 = pre-versioning build)
@@ -33,7 +33,8 @@ Header layout (all little-endian)::
     52     1    mod->py food_to_hibernate uint8, pips needed to sleep this cycle (== food_max while malnourished)
     53     1    mod->py malnourished    uint8 0/1, the previous sleep was a starving one
     54     4    mod->py region          ASCII region acronym (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
-    58     6    -       reserved
+    58     1    py->mod command_arg     argument of the command (ENTER_SHELTER: food pips)
+    59     5    -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
 
 Actions are *raw key presses*: ``action_bits`` has one bit per key a player
@@ -113,6 +114,7 @@ OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FOOD_TO_HIBERNATE = 52 # mod->py uint8
 OFFSET_MALNOURISHED = 53      # mod->py uint8 (0/1)
 OFFSET_REGION = 54            # mod->py 4 bytes ASCII, NUL-padded (region acronym, "" if unavailable)
+OFFSET_COMMAND_ARG = 58       # py->mod, written by send_command
 REGION_SIZE = 4
 OFFSET_FRAME_DATA = HEADER_SIZE
 
@@ -155,6 +157,7 @@ MOD_OWNED_STATUS_MASK = 0xFF & ~PY_OWNED_STATUS_MASK
 COMMAND_NONE = 0
 COMMAND_RESET = 1
 COMMAND_KILL_PLAYER = 2       # debug: kill player 0 (death edge + respawn flow)
+COMMAND_ENTER_SHELTER = 3     # debug: send player 0 into its den shelter with command_arg food pips (sleep flow)
 
 # Command results
 COMMAND_RESULT_PENDING = 0
@@ -196,7 +199,7 @@ HEADER_STRUCT = struct.Struct(
     "B"    # food_to_hibernate
     "B"    # malnourished
     "4s"   # region (ASCII, NUL-padded)
-    "6x"   # reserved
+    "6x"   # command_arg (py->mod, written on its own by send_command) + reserved
 )
 assert HEADER_STRUCT.size == HEADER_SIZE, HEADER_STRUCT.size
 
@@ -934,12 +937,12 @@ class SharedMemoryClient:
 
     # -- commands ----------------------------------------------------------
 
-    def send_command(self, command: int, timeout: float = 60.0) -> int:
+    def send_command(self, command: int, timeout: float = 60.0, arg: int = 0) -> int:
         """
         Issue a command and block until the mod acknowledges it.
 
-        Clears ``command_result``, writes ``command``, then polls
-        ``command_result`` until it is non-zero.
+        Clears ``command_result``, writes ``arg`` (``command_arg``) and
+        ``command``, then polls ``command_result`` until it is non-zero.
 
         Returns:
             The result code (``COMMAND_RESULT_OK``).
@@ -950,6 +953,7 @@ class SharedMemoryClient:
         """
         self._require_connected()
         self._write_byte(OFFSET_COMMAND_RESULT, COMMAND_RESULT_PENDING)
+        self._write_byte(OFFSET_COMMAND_ARG, arg)
         self._write_byte(OFFSET_COMMAND, command)
 
         deadline = time.monotonic() + timeout
@@ -994,6 +998,27 @@ class SharedMemoryClient:
         """
         self._require_connected()
         self.send_command(COMMAND_KILL_PLAYER, timeout = timeout)
+        return self.read_state()
+
+    def enter_shelter(self, food: int, timeout: float = 10.0) -> ModState:
+        """
+        Send ``ENTER_SHELTER`` - a **debug/testing** command: set player 0's
+        food to ``food`` pips (clamped to its maximum) and send it into its den
+        shelter (the shelter it last woke up in, or the slugcat's default one)
+        through the shelter's entrance pipe, as if it had walked in.
+
+        The mod acks at once; the arrival and any sleep are observed through
+        later steps. With ``food_to_hibernate`` pips the game hibernates the
+        slugcat once it stands still away from the entrance (fed sleep); with
+        fewer it sleeps starving if DOWN is held for 260 ticks there.
+
+        Raises:
+            CommandError: the mod reported ERROR (RL mode not fully on, no live
+                player 0, den shelter not in the current region) or did not ack
+                within ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_ENTER_SHELTER, timeout = timeout, arg = food)
         return self.read_state()
 
     # -- misc --------------------------------------------------------------
