@@ -3,9 +3,9 @@
 Python client for the Rain World RL mod. Protocol details live in
 [PROTOCOL.md](PROTOCOL.md); this page covers day-to-day usage.
 
-Requirements: Windows, Python >= 3.11, `numpy`, `gymnasium`
-(`pip install -e .`). The .NET SDK is only needed if you
-let `launch()` build the mod.
+Requirements: Windows or Linux (see the README's Quick start), Python >= 3.11,
+`numpy`, `gymnasium` (`pip install -e .`). The package ships a prebuilt mod DLL;
+the .NET SDK is only needed to change the mod.
 
 ## Importing
 
@@ -46,7 +46,7 @@ env.close()                  # detach; the game keeps running
 | Call | What it does |
 |------|--------------|
 | `RainWorldEnv(...)` | Builds spaces and a client object. Never launches or touches the game. |
-| `env.launch(build=True, restart=True, wait_ready=True)` | **Heavy.** `dotnet build` + deploy the DLL, kill a running `RainWorld.exe`, start it directly (Steam must already be running), wait for the mod heartbeat, then `connect()`. Raises `LaunchError` with the last 40 lines of `BepInEx/LogOutput.log` on failure. |
+| `env.launch(build=None, restart=True, wait_ready=True)` | **Heavy.** Build the mod if possible (source checkout with `dotnet`), else deploy the prebuilt DLL; kill a running game; start it (Windows: `RainWorld.exe` directly; Linux: under Wine, see `launcher`); wait for the mod heartbeat, then `connect()`. Raises `LaunchError` with the tail of the game log on failure. |
 | `env.connect(wait_ready=True)` | Attach to a running game: liveness check (heartbeat), set `CONNECTED`, optionally wait for `READY`. Raises `GameNotRunningError` if nothing is running. |
 | `env.reset(options={"wipe": True})` | Connects if needed, sends `RESET` (wipe RL save, fresh story game, wait for READY), then does one no-op step and returns `(frame, info)`. `options={"wipe": False}` skips the command and just returns the current frame of the game in progress (requires READY). |
 | `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. |
@@ -54,7 +54,8 @@ env.close()                  # detach; the game keeps running
 | `env.debug_kill(timeout=10)` | **Debug/testing only.** Sends `KILL_PLAYER`: the mod kills the slugcat immediately and acks; the respawn is observed through later `step()` calls (see below). Not part of the RL interface. |
 
 Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (10 s),
-`reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`.
+`reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`,
+`instance` (Linux: which of several games running side by side to drive).
 
 ### Reset semantics
 
@@ -276,7 +277,10 @@ launch_timeout = 120.0
 ```
 
 Lookup order: explicit `load_config(path)` argument > `$RAINWORLD_RL_CONFIG` >
-`./rainworld_rl.toml` > defaults. Derived from `game_dir`: `exe_path`,
+`./rainworld_rl.toml` > `~/.config/rainworld_rl/rainworld_rl.toml` (written by
+`rainworld-rl setup`) > defaults. Linux-only keys: `container` (the Apptainer
+image), `wine_prefix_dir` and `renderer` (`auto`, `cpu`, `wsl`, `virtualgl`; see
+`rainworld_rl.example.toml`). Derived from `game_dir`: `exe_path`,
 `plugins_dir`, `plugin_dll_path`, `bepinex_log`. `build.ps1` reads `game_dir`
 from the same file.
 
@@ -296,9 +300,10 @@ python -m rainworld_rl.launcher --build-only # dotnet build + copy DLL
 python -m rainworld_rl.launcher --kill       # stop a running game
 ```
 
-Steam must be running; the launcher starts `RainWorld.exe` directly. The DLL
-is copied only after the old game process exits because BepInEx keeps plugin
-assemblies locked.
+The Steam client does not need to be running. On Windows the launcher starts
+`RainWorld.exe` directly and copies the DLL only after the old game process
+exits, because BepInEx keeps plugin assemblies locked. On Linux each game runs
+under Wine on its own Xvfb display; `--instance N` runs several side by side.
 
 ## Smoke test
 

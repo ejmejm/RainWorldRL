@@ -90,7 +90,7 @@ def test_renderer(tmp_path):
     p = tmp_path / "c.toml"
     p.write_text('renderer = "virtualgl"\n', encoding = "utf-8")
     assert cfg.load_config(p).renderer == "virtualgl"
-    assert cfg.Config().renderer == "cpu"
+    assert cfg.Config().renderer == "auto"
     p.write_text('renderer = "vulkan"\n', encoding = "utf-8")
     with pytest.raises(cfg.ConfigError):
         cfg.load_config(p)

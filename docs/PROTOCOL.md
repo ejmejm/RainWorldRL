@@ -2,6 +2,10 @@
 
 Named memory-mapped file `RainWorldRL`, created by whichever side comes first
 (`MemoryMappedFile.CreateOrOpen` in C#, `mmap(-1, size, tagname=...)` in Python).
+On Linux, where the game runs under Wine, the mapping is instead the file named by
+the `RAINWORLD_RL_SHM` environment variable (a `/dev/shm` file, which Wine sees as
+`Z:\dev\shm\...`), mapped by both sides; the launcher sets it per instance. If
+`RAINWORLD_RL_SAVE_DIR` is set, the mod keeps the RL save there.
 Total size = `HEADER_SIZE + MAX_FRAME_SIZE` = 64 + 1920*1080*3.
 
 All multi-byte integers are little-endian. Floats are IEEE-754 float32.

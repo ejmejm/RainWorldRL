@@ -44,8 +44,8 @@ else:
 DEFAULT_WINE_PREFIX_DIR = LINUX_DATA_DIR / "wine"
 DEFAULT_LAUNCH_TIMEOUT = 120.0
 
-# Linux: how the game's OpenGL is rendered (see launcher._renderer).
-RENDERERS = ("cpu", "wsl", "virtualgl")
+# Linux: how the game is rendered (see launcher.resolve_renderer / launcher._renderer).
+RENDERERS = ("auto", "cpu", "wsl", "virtualgl")
 
 GAME_EXE_NAME = "RainWorld.exe"
 PLUGIN_DLL_NAME = "RainWorldRL.dll"
@@ -69,9 +69,10 @@ class Config:
             Xvfb. None runs ``wine`` / ``Xvfb`` from the host's PATH.
         wine_prefix_dir: Linux only: holds one Wine prefix per game instance
             (hard-linked copies of a base prefix, created on first launch).
-        renderer: Linux only: ``"cpu"`` (Mesa llvmpipe, default), ``"wsl"``
-            (WSL2's GPU via Mesa d3d12) or ``"virtualgl"`` (a GPU's EGL device
-            via VirtualGL; NVIDIA, AMD, Intel).
+        renderer: Linux only: ``"auto"`` (default: ``virtualgl`` when an NVIDIA
+            GPU is visible, else ``wsl`` on WSL2, else ``cpu``), ``"cpu"`` (DXVK on
+            Mesa lavapipe), ``"wsl"`` (WSL2's GPU via Mesa d3d12) or ``"virtualgl"``
+            (a GPU's EGL device via VirtualGL).
         source: The config file the values came from, or None for defaults.
     """
 
@@ -80,7 +81,7 @@ class Config:
     rl_save_dir: Optional[Path] = None
     container: Optional[Path] = None
     wine_prefix_dir: Path = DEFAULT_WINE_PREFIX_DIR
-    renderer: str = "cpu"
+    renderer: str = "auto"
     source: Optional[Path] = field(default = None, compare = False)
 
     def __post_init__(self) -> None:

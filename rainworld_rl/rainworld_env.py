@@ -6,7 +6,7 @@ Lifecycle
 ``RainWorldEnv(...)`` is cheap and never touches the game. Attach with one of:
 
 * ``env.launch()``  - build the mod, (re)start ``RainWorld.exe``, wait for the
-  mod, then connect. Heavy; Steam must be running.
+  mod, then connect. Heavy.
 * ``env.connect()`` - attach to a game that is already running.
 * ``env.reset()``   - connects if needed (raising ``GameNotRunningError`` with
   a hint to call ``launch()`` if nothing is running), sends the ``RESET``
@@ -179,19 +179,21 @@ class RainWorldEnv(gym.Env):
             self._client.connect(wait_ready = wait_ready, ready_timeout = self.ready_timeout)
         except GameNotRunningError as e:
             raise GameNotRunningError(
-                f"{e} Start Rain World with the RainWorldRL mod (Steam running), "
+                f"{e} Start Rain World with the RainWorldRL mod, "
                 "or call env.launch() to build + start it automatically."
             ) from e
 
-    def launch(self, *, build: bool = True, restart: bool = True, wait_ready: bool = True) -> None:
+    def launch(self, *, build: Optional[bool] = None, restart: bool = True, wait_ready: bool = True) -> None:
         """
         Build the mod, (re)start Rain World, wait for the mod and connect.
 
-        This is the one heavy call. Steam must already be running. Uses
+        This is the one heavy call. Uses
         ``self.config`` (or loads ``rainworld_rl.toml`` / defaults).
 
         Args:
-            build: Run ``dotnet build`` and deploy the DLL first.
+            build: ``dotnet build`` and deploy the DLL first. None (default):
+                build when possible, else deploy the packaged prebuilt DLL;
+                False: leave the deployed DLL alone (see ``launcher.launch``).
             restart: Kill a running game before starting a new one.
             wait_ready: Wait for READY as part of the connect.
 
