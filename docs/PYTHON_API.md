@@ -262,6 +262,8 @@ All protocol errors derive from `SharedMemoryError`:
 - `StepTimeoutError` - mod alive but no frame within `frame_timeout`.
 - `CommandError` - `RESET` / `KILL_PLAYER` was rejected or not acknowledged.
 - `NotConnectedError` - a client operation was used before `connect()`.
+- `ProtocolVersionError` - on connect: the deployed mod DLL is from another version of the
+  library (stale DLL). `launch()` redeploys the packaged mod; `rainworld-rl setup` installs it.
 
 `LaunchError` (from `launcher`) covers build/start failures.
 

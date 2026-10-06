@@ -3,7 +3,7 @@ using System.IO.MemoryMappedFiles;
 
 /// <summary>
 /// Manages shared memory communication between the Rain World mod and the Python RL client.
-/// Implements protocol v3 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
+/// Implements protocol v4 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
 ///
 /// Header layout (64 bytes):
 ///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
@@ -15,7 +15,7 @@ using System.IO.MemoryMappedFiles;
 ///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER); mod clears when done
 ///   13  u8   command_result   mod->py (0 none, 1 OK, 2 ERROR)
 ///   14  u8   game_flags       mod->py (b0 IN_SHELTER, b1 CYCLE_SURVIVED edge, b2 RAIN, b3 DIALOG_OPEN)
-///   15  u8   reserved
+///   15  u8   protocol_version mod->py PROTOCOL_VERSION, written as soon as the mapping exists
 ///   16  u32  heartbeat        mod->py, incremented every Unity Update
 ///   20  u32  step_counter     mod->py, incremented once per completed step
 ///   24  u8   karma
@@ -37,6 +37,8 @@ using System.IO.MemoryMappedFiles;
 public class SharedMemoryBridge : IDisposable
 {
     public const string SHARED_MEMORY_NAME = "RainWorldRL";
+    // Bump whenever the header layout or the meaning of a field/command changes (with rainworld_rl/shared_memory.py).
+    public const byte PROTOCOL_VERSION = 4;
     public const int HEADER_SIZE = 64;
     public const int MAX_FRAME_WIDTH = 1920;
     public const int MAX_FRAME_HEIGHT = 1080;
@@ -68,6 +70,7 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_COMMAND = 12;
     private const int OFFSET_COMMAND_RESULT = 13;
     private const int OFFSET_GAME_FLAGS = 14;
+    private const int OFFSET_PROTOCOL_VERSION = 15;
     private const int OFFSET_HEARTBEAT = 16;
     private const int OFFSET_STEP_COUNTER = 20;
     private const int OFFSET_KARMA = 24;
@@ -161,6 +164,8 @@ public class SharedMemoryBridge : IDisposable
             Location = path;
         }
         accessor = mmf.CreateViewAccessor();
+        // First, so it is there before MOD_ALIVE is ever set; nothing else writes this byte.
+        accessor.Write(OFFSET_PROTOCOL_VERSION, PROTOCOL_VERSION);
 
         // Reset the handshake and our own status bits. Python's CONNECTED bit and
         // the py->mod fields (action_bits, dims, command) are left untouched in case the

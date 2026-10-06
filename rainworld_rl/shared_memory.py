@@ -1,7 +1,7 @@
 """
 Shared memory client for communicating with the Rain World RL mod.
 
-Implements protocol v3 as described in ``docs/PROTOCOL.md``. The mapping is a
+Implements protocol v4 as described in ``docs/PROTOCOL.md``. The mapping is a
 named memory-mapped file (``RainWorldRL``) consisting of a 64-byte header
 followed by an RGB24 frame of up to 1920x1080.
 
@@ -17,7 +17,7 @@ Header layout (all little-endian)::
     12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
     14     1    mod->py game_flags      see GAME_FLAG_* bits
-    15     1    -       reserved
+    15     1    mod->py protocol_version PROTOCOL_VERSION, written as soon as the mapping exists (0 = pre-versioning build)
     16     4    mod->py heartbeat       uint32, bumped every Unity Update
     20     4    mod->py step_counter    uint32, bumped once per completed step
     24     1    mod->py karma           uint8
@@ -73,6 +73,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SHARED_MEMORY_NAME = "RainWorldRL"
+# Bump whenever the header layout or the meaning of a field/command changes (with SharedMemoryBridge.cs).
+PROTOCOL_VERSION = 4
 HEADER_SIZE = 64
 MAX_FRAME_WIDTH = 1920
 MAX_FRAME_HEIGHT = 1080
@@ -95,6 +97,7 @@ OFFSET_HEIGHT = 8
 OFFSET_COMMAND = 12
 OFFSET_COMMAND_RESULT = 13
 OFFSET_GAME_FLAGS = 14
+OFFSET_PROTOCOL_VERSION = 15
 OFFSET_HEARTBEAT = 16
 OFFSET_STEP_COUNTER = 20
 OFFSET_KARMA = 24
@@ -177,7 +180,7 @@ HEADER_STRUCT = struct.Struct(
     "B"    # command
     "B"    # command_result
     "B"    # game_flags
-    "x"    # reserved
+    "B"    # protocol_version
     "I"    # heartbeat
     "I"    # step_counter
     "B"    # karma
@@ -239,6 +242,10 @@ class CommandError(SharedMemoryError):
     """The mod reported an error, or timed out, while executing a command."""
 
 
+class ProtocolVersionError(SharedMemoryError):
+    """The running mod speaks a different protocol version than this package (stale mod DLL)."""
+
+
 # ---------------------------------------------------------------------------
 # Header dataclass
 # ---------------------------------------------------------------------------
@@ -260,6 +267,7 @@ class ModState:
     command: int = COMMAND_NONE
     command_result: int = COMMAND_RESULT_PENDING
     game_flags: int = 0
+    protocol_version: int = 0  # PROTOCOL_VERSION of the mod; 0 = a mod build from before versioning
     heartbeat: int = 0
     step_counter: int = 0
     karma: int = 0
@@ -335,6 +343,7 @@ class ModState:
             self.command & 0xFF,
             self.command_result & 0xFF,
             self.game_flags & 0xFF,
+            self.protocol_version & 0xFF,
             self.heartbeat & 0xFFFFFFFF,
             self.step_counter & 0xFFFFFFFF,
             self.karma & 0xFF,
@@ -667,7 +676,8 @@ class SharedMemoryClient:
         Attach to a running game.
 
         1. Open the mapping and confirm the mod is alive (heartbeat advances;
-           see ``wait_for_alive`` for the ``MOD_ALIVE`` stall grace).
+           see ``wait_for_alive`` for the ``MOD_ALIVE`` stall grace) and
+           speaks ``PROTOCOL_VERSION``.
         2. Write the requested frame dimensions and raise ``CONNECTED``.
         3. Optionally wait for ``READY``.
 
@@ -676,6 +686,8 @@ class SharedMemoryClient:
         Raises:
             GameNotRunningError: no live mod behind the mapping. The mapping is
                 closed again before raising.
+            ProtocolVersionError: the mod is from another version of the library
+                (stale DLL). The mapping is closed again before raising.
             ReadyTimeoutError: ``wait_ready`` was set and READY never rose.
         """
         try:
@@ -683,6 +695,16 @@ class SharedMemoryClient:
         except GameNotRunningError:
             self._close()
             raise
+        if state.protocol_version != PROTOCOL_VERSION:
+            self._close()
+            found = state.protocol_version
+            raise ProtocolVersionError(
+                f"The RainWorldRL mod in the running game speaks protocol version "
+                f"{'0 (a mod build from before versioning)' if found == 0 else found}, but this rainworld_rl "
+                f"package expects version {PROTOCOL_VERSION}: the deployed mod DLL is from another version "
+                "of the library. env.launch() redeploys the packaged mod and restarts the game, "
+                "or `rainworld-rl setup` installs it."
+            )
 
         self._write_frame_dimensions()
         self.set_connected(True)

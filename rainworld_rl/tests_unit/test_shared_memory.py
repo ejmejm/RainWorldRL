@@ -32,6 +32,7 @@ def test_header_struct_matches_protocol_offsets():
     state = ModState(
         sync_flag = 2, ticks_per_step = 4, status = 0x3F,
         frame_width = 160, frame_height = 90, command = 1, command_result = 2, game_flags = 0x0B,
+        protocol_version = 4,
         heartbeat = 0xDEADBEEF, step_counter = 77, karma = 3, karma_cap = 5, food = 9, food_max = 11,
         player_x = 1.5, player_y = -2.5, room_index = -1, cycle_number = 12,
         action_bits = 0x1A5, cycle_progress = 0.5,
@@ -42,7 +43,7 @@ def test_header_struct_matches_protocol_offsets():
     assert buf[0] == 2 and buf[1] == 0 and buf[2] == 4 and buf[3] == 0x3F   # offset 1 reserved
     assert struct.unpack_from("<I", buf, 4)[0] == 160
     assert struct.unpack_from("<I", buf, 8)[0] == 90
-    assert buf[12] == 1 and buf[13] == 2 and buf[14] == 0x0B and buf[15] == 0
+    assert buf[12] == 1 and buf[13] == 2 and buf[14] == 0x0B and buf[15] == 4
     assert struct.unpack_from("<I", buf, 16)[0] == 0xDEADBEEF
     assert struct.unpack_from("<I", buf, 20)[0] == 77
     assert buf[24:28] == bytes((3, 5, 9, 11))
@@ -245,6 +246,18 @@ def test_connect_without_waiting_for_ready():
     client = make_client(mapping)
     client.connect(wait_ready = False, liveness_timeout = 0.1)
     assert client.is_connected() and not mapping.header().ready
+
+
+@pytest.mark.parametrize("version", [0, 3])
+def test_connect_rejects_protocol_version_mismatch(version):
+    mapping = FakeMapping(protocol_version = version)
+    client = make_client(mapping)
+    with pytest.raises(sm.ProtocolVersionError, match = f"speaks protocol version {version}") as excinfo:
+        client.connect(liveness_timeout = 0.1)
+    assert f"expects version {sm.PROTOCOL_VERSION}" in str(excinfo.value)
+    assert ("before versioning" in str(excinfo.value)) == (version == 0)
+    assert mapping.closed and not client.is_connected()
+    assert not mapping.header().connected   # an incompatible mod never enters RL mode
 
 
 # ---------------------------------------------------------------------------
