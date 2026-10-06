@@ -324,6 +324,27 @@ public class RainWorldRL : BaseUnityPlugin
             sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
             sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
         }
+        else if (command == SharedMemoryBridge.CMD_HOP_ROOM || command == SharedMemoryBridge.CMD_SWITCH_REGION)
+        {
+            // Debug/testing aids: send player 0 into a neighbouring room / region (command_arg picks the exit / gate)
+            // and ack once it is on its way. The arrival is observed through subsequent steps.
+            bool hop = command == SharedMemoryBridge.CMD_HOP_ROOM;
+            string name = hop ? "HOP_ROOM" : "SWITCH_REGION";
+            bool sent = false;
+            try
+            {
+                int arg = sharedMemory.ReadCommandArg();
+                sent = hop ? gameFlow.HopRoom(rainWorld, arg) : gameFlow.SwitchRegion(rainWorld, arg);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"{name} failed: {ex}");
+            }
+            if (!sent)
+                Logger.LogWarning($"{name} command could not be applied; reporting ERROR");
+            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+        }
         else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
         {
             Logger.LogWarning($"Unknown command {command}; reporting ERROR");

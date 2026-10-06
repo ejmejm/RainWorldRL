@@ -446,6 +446,26 @@ def test_kill_player_timeout_raises():
         client.kill_player(timeout = 0.05)
 
 
+@pytest.mark.parametrize("method, command", [("hop_room", sm.COMMAND_HOP_ROOM),
+                                             ("switch_region", sm.COMMAND_SWITCH_REGION)])
+def test_room_and_region_moves_send_their_arg_and_ack_without_stepping(method, command):
+    mapping = FakeMapping()
+    client = make_client(mapping)
+    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+
+    state = getattr(client, method)(3, timeout = 1.0)
+    getattr(client, method)(0, timeout = 1.0)
+
+    assert mapping.commands_received == [command, command]
+    assert mapping.command_args == [3, 0]          # the exit / gate choice travels in command_arg
+    assert state.command == sm.COMMAND_NONE and state.command_result == sm.COMMAND_RESULT_OK
+    assert mapping.steps_serviced == []            # the ack does not step the game
+
+    mapping.fail_commands = True
+    with pytest.raises(sm.CommandError, match = "error"):
+        getattr(client, method)(1, timeout = 1.0)
+
+
 def test_operations_require_connection():
     client = make_client(FakeMapping())
     with pytest.raises(sm.NotConnectedError):
@@ -589,6 +609,26 @@ def test_env_debug_kill_requires_connection_and_propagates_command_error():
     mapping.fail_commands = True
     with pytest.raises(sm.CommandError):
         env.debug_kill(timeout = 0.2)
+
+
+def test_env_debug_hop_room_and_switch_region_send_commands():
+    env = make_env(FakeMapping())
+    with pytest.raises(sm.GameNotRunningError):
+        env.debug_hop_room(1)
+    with pytest.raises(sm.GameNotRunningError):
+        env.debug_switch_region()
+
+    mapping = FakeMapping()
+    env = make_env(mapping)
+    env.reset()
+    env.debug_hop_room(7)
+    env.debug_switch_region(2)
+    assert mapping.commands_received == [sm.COMMAND_RESET, sm.COMMAND_HOP_ROOM, sm.COMMAND_SWITCH_REGION]
+    assert mapping.command_args[1:] == [7, 2]
+
+    mapping.fail_commands = True
+    with pytest.raises(sm.CommandError):
+        env.debug_hop_room(0, timeout = 0.2)
 
 
 def test_env_step_before_connect_raises():

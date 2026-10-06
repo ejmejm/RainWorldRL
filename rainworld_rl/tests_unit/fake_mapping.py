@@ -12,7 +12,9 @@ header read:
 * ``service_commands`` - when ``command == RESET``, "wipe" and ack with
   ``command_result = OK``, ``command = NONE``, and raise ``READY``; when
   ``command == KILL_PLAYER``, arm ``next_step_dead`` (the next serviced step
-  reports the ``PLAYER_DEAD`` edge) and ack ``OK``.
+  reports the ``PLAYER_DEAD`` edge) and ack ``OK``; ``HOP_ROOM`` and
+  ``SWITCH_REGION`` are acked ``OK`` while ``READY`` (``command_args``
+  records each command's ``command_arg``).
 
 Everything happens synchronously inside ``__getitem__`` so tests are
 deterministic; a few tests use a thread for the time-based behaviour.
@@ -41,6 +43,7 @@ class FakeMapping(bytearray):
         self.closed = False
         self.steps_serviced: List[tuple] = []   # (action_bits, ticks)
         self.commands_received: List[int] = []
+        self.command_args: List[int] = []
         self.fill_value = 7                      # byte written into the frame
         self.mod_fields = dict(
             karma = 3, karma_cap = 5, food = 2, player_x = 123.5, player_y = -4.25,
@@ -109,6 +112,7 @@ class FakeMapping(bytearray):
     def service_command(self) -> None:
         h = self.header()
         self.commands_received.append(h.command)
+        self.command_args.append(self.raw(sm.OFFSET_COMMAND_ARG, 1)[0])
         if h.command == sm.COMMAND_RESET and not self.fail_commands:
             self.mod_fields["cycle_number"] = 0
             self.set_mod_bit(sm.STATUS_READY, True)
@@ -118,6 +122,8 @@ class FakeMapping(bytearray):
             # Like the mod: the kill is applied immediately; the death EDGE shows
             # up on the next step and the ack never waits for the respawn.
             self.next_step_dead = True
+            result = sm.COMMAND_RESULT_OK
+        elif h.command in (sm.COMMAND_HOP_ROOM, sm.COMMAND_SWITCH_REGION) and not self.fail_commands and h.ready:
             result = sm.COMMAND_RESULT_OK
         else:
             result = sm.COMMAND_RESULT_ERROR

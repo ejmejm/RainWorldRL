@@ -14,7 +14,7 @@ Header layout (all little-endian)::
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
-    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug), 3 ENTER_SHELTER (debug)
+    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER, 3 ENTER_SHELTER, 4 HOP_ROOM, 5 SWITCH_REGION (2-5: debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
     14     1    mod->py game_flags      see GAME_FLAG_* bits
     15     1    mod->py protocol_version PROTOCOL_VERSION, written as soon as the mapping exists (0 = pre-versioning build)
@@ -33,7 +33,7 @@ Header layout (all little-endian)::
     52     1    mod->py food_to_hibernate uint8, pips needed to sleep this cycle (== food_max while malnourished)
     53     1    mod->py malnourished    uint8 0/1, the previous sleep was a starving one
     54     4    mod->py region          ASCII region acronym (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
-    58     1    py->mod command_arg     argument of the command (ENTER_SHELTER: food pips)
+    58     1    py->mod command_arg     argument of the command (ENTER_SHELTER: food pips; HOP_ROOM: exit; SWITCH_REGION: gate)
     59     5    -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
 
@@ -158,6 +158,8 @@ COMMAND_NONE = 0
 COMMAND_RESET = 1
 COMMAND_KILL_PLAYER = 2       # debug: kill player 0 (death edge + respawn flow)
 COMMAND_ENTER_SHELTER = 3     # debug: send player 0 into its den shelter with command_arg food pips (sleep flow)
+COMMAND_HOP_ROOM = 4          # debug: send player 0 through exit command_arg (mod: % usable exits) into the next room
+COMMAND_SWITCH_REGION = 5     # debug: take player 0 through gate command_arg (mod: % usable gates) into the next region
 
 # Command results
 COMMAND_RESULT_PENDING = 0
@@ -1015,6 +1017,51 @@ class SharedMemoryClient:
         """
         self._require_connected()
         self.send_command(COMMAND_ENTER_SHELTER, timeout = timeout, arg = food)
+        return self.read_state()
+
+    def hop_room(self, exit: int, timeout: float = 10.0) -> ModState:
+        """
+        Send ``HOP_ROOM`` - a **debug/testing** command: send player 0 out
+        through one of its room's exits into the neighbouring room, as if it
+        had walked into that pipe. ``exit`` (0-255) picks the exit:
+        ``exit % n`` of the room's ``n`` usable exits (exits that lead
+        nowhere are skipped), so a seeded RNG gives reproducible routes.
+
+        The mod acks once the slugcat is in the pipe; ``ready`` stays up.
+        ``room_index`` changes once the next room has loaded and the slugcat
+        is in its pipe (usually within a few steps), and it comes out of the
+        pipe a few steps later.
+
+        Raises:
+            CommandError: the mod reported ERROR (RL mode not fully on, no live
+                player 0 in a room, already on its way out of the room or
+                through a region switch, no usable exit) or did not ack within
+                ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_HOP_ROOM, timeout = timeout, arg = exit)
+        return self.read_state()
+
+    def switch_region(self, gate: int = 0, timeout: float = 10.0) -> ModState:
+        """
+        Send ``SWITCH_REGION`` - a **debug/testing** command: take player 0
+        through a region gate of its region into the neighbouring region with
+        the game's own gate logic (karma requirement skipped). ``gate``
+        (0-255) picks the gate: ``gate % n`` of the region's ``n`` usable
+        gates.
+
+        The mod acks once the slugcat is on its way to the gate room. It then
+        holds still (input is ignored) while the gate starts and the next
+        region loads; ``region`` changes when the world has loaded, and the
+        slugcat then leaves the gate room into the new region, after which it
+        takes input again. Other debug moves are rejected until then.
+
+        Raises:
+            CommandError: the mod reported ERROR (as for ``hop_room``, or the
+                region has no usable gate) or did not ack within ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_SWITCH_REGION, timeout = timeout, arg = gate)
         return self.read_state()
 
     # -- misc --------------------------------------------------------------

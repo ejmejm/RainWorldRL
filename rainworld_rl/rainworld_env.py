@@ -23,6 +23,9 @@ demand so the death -> respawn flow can be exercised deterministically. It is
 not part of the RL interface and is not something an agent should call.
 ``env.debug_enter_shelter(food)`` is its counterpart for the sleep flow: it
 sends the slugcat into its den shelter so a real hibernation can be tested.
+``env.debug_hop_room(exit)`` and ``env.debug_switch_region(gate)`` move the
+slugcat into a neighbouring room or region through the game's own transition
+code, for soak tests of room and region loading.
 
 Observation = RGB frame only. All other state is in ``info``:
 ``player_dead``, ``karma``, ``karma_cap``, ``food``, ``food_max``,
@@ -340,6 +343,56 @@ class RainWorldEnv(gym.Env):
             raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
         logger.info("Sending ENTER_SHELTER (debug, food=%d)...", food)
         self._client.enter_shelter(food, timeout = timeout)
+
+    def debug_hop_room(self, exit: int, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: send the slugcat out through one of its room's
+        exits into the neighbouring room (``HOP_ROOM``), as if it had walked
+        into that pipe. Not part of the RL interface.
+
+        ``exit`` (0-255) picks the exit: ``exit % n`` of the room's ``n``
+        usable exits (exits that lead nowhere are skipped), so exits drawn
+        from a seeded RNG give a reproducible route. Returns once the slugcat
+        is in the pipe; ``info["room_index"]`` changes once the next room has
+        loaded (usually within a few steps) and the slugcat comes out of the
+        pipe a few steps later. ``ready`` stays True throughout.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (not in a game, no live
+                player in a room, already on its way out of it, a region switch
+                in progress, no usable exit) or did not ack within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.debug("Sending HOP_ROOM (debug, exit=%d)...", exit)
+        self._client.hop_room(exit, timeout = timeout)
+
+    def debug_switch_region(self, gate: int = 0, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: take the slugcat through a region gate of its
+        region into the neighbouring region (``SWITCH_REGION``), with the
+        game's own gate and world-loading code (the karma requirement is
+        skipped). Not part of the RL interface.
+
+        ``gate`` (0-255) picks the gate: ``gate % n`` of the region's ``n``
+        usable gates. Returns once the slugcat is on its way to the gate room.
+        From then on it ignores input; ``info["region"]`` changes when the next
+        region has loaded, then the slugcat leaves the gate room into the new
+        region (``room_index`` changes again) and takes input again. ``ready``
+        stays True throughout; other debug moves are rejected until the
+        slugcat is out of the gate room.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (as for
+                ``debug_hop_room``, or the region has no usable gate) or did
+                not ack within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.info("Sending SWITCH_REGION (debug, gate=%d)...", gate)
+        self._client.switch_region(gate, timeout = timeout)
 
     # -- knobs -------------------------------------------------------------
 
