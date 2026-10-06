@@ -31,6 +31,7 @@ public class RainWorldRL : BaseUnityPlugin
     private SaveRedirector saveRedirector;
     private GameFlowController gameFlow;
     private WorkerThreadFix workerThreadFix;
+    private readonly CoreWarmer coreWarmer = new CoreWarmer();
 
     // Config
     private ConfigEntry<string> cfgSlugcat;
@@ -93,6 +94,8 @@ public class RainWorldRL : BaseUnityPlugin
                 VerboseLogging = cfgVerboseLogging.Value,
             };
             workerThreadFix = new WorkerThreadFix(Logger);
+            if (coreWarmer.Enabled)
+                Logger.LogInfo($"Core warmer enabled ({CoreWarmer.ENV_VAR}=1)");
 
             cfgSpeedMultiplier.SettingChanged += (s, e) => stepController.SpeedMultiplier = cfgSpeedMultiplier.Value;
             cfgRenderScale.SettingChanged += (s, e) => frameCapture.RenderScale = cfgRenderScale.Value;
@@ -140,6 +143,7 @@ public class RainWorldRL : BaseUnityPlugin
     void OnDestroy()
     {
         ForceStopRLMode("plugin destroyed");
+        coreWarmer.SetActive(false);
         UninstallHooks();
 
         if (modsInitHookSubscribed)
@@ -325,6 +329,7 @@ public class RainWorldRL : BaseUnityPlugin
             stepController.ProcessUpdate();
         stepController.UpdateRendering();
         frameCapture.SetAgentInControl(stepController.AgentInControl);
+        coreWarmer.SetActive(stepController.AgentInControl);
     }
 
     void FixedUpdate()
