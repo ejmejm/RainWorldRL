@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rainworld-rl"
-version = "0.4.0"
+version = "1.0.0"
 description = "Rain World as a Gymnasium reinforcement learning environment (BepInEx mod + Python client)"
 readme = "README.md"
 requires-python = ">=3.11"
