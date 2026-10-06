@@ -121,7 +121,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p = sub.add_parser("doctor", help = "Launch the game, run random steps and report steps/s")
     p.add_argument("--steps", type = int, default = 500)
-    p.add_argument("--ticks", type = int, default = 1)
+    p.add_argument("--ticks", type = int, default = 4)
     p.add_argument("--instance", type = int, default = 0)
 
     args = parser.parse_args(argv)
