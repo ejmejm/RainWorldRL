@@ -3,23 +3,18 @@
 Python client for the Rain World RL mod. Protocol details live in
 [PROTOCOL.md](PROTOCOL.md); this page covers day-to-day usage.
 
-Requirements: Windows, Python >= 3.11, `numpy`, `gymnasium`
-(`pip install -e .`). The .NET SDK is only needed if you
-let `launch()` build the mod.
+Requirements: Windows or Linux (see the README's Quick start), Python >= 3.11,
+`numpy`, `gymnasium` (`pip install -e .`). The package ships a prebuilt mod DLL;
+the .NET SDK is only needed to change the mod.
 
 ## Importing
 
-The repository directory *is* the package (`rainworld_rl`) and the code lives
-in its `python` subpackage, so the **parent** of the repo must be on
-`sys.path` (e.g. `E:/projects` for `E:/projects/rainworld_rl`):
-
 ```python
-import sys; sys.path.insert(0, "E:/projects")      # or set PYTHONPATH
 from rainworld_rl import RainWorldEnv, GameNotRunningError
 ```
 
-`gym.make("RainWorld-v0")` works once `rainworld_rl.rainworld_env` has
-been imported (registration happens at import time with entry point
+`gym.make("RainWorld-v0")` works once `rainworld_rl` has been imported
+(registration happens at import time with entry point
 `rainworld_rl.rainworld_env:RainWorldEnv`).
 
 ## Quick start
@@ -46,15 +41,19 @@ env.close()                  # detach; the game keeps running
 | Call | What it does |
 |------|--------------|
 | `RainWorldEnv(...)` | Builds spaces and a client object. Never launches or touches the game. |
-| `env.launch(build=True, restart=True, wait_ready=True)` | **Heavy.** `dotnet build` + deploy the DLL, kill a running `RainWorld.exe`, start it directly (Steam must already be running), wait for the mod heartbeat, then `connect()`. Raises `LaunchError` with the last 40 lines of `BepInEx/LogOutput.log` on failure. |
+| `env.launch(build=None, restart=True, wait_ready=True)` | **Heavy.** Build the mod if possible (source checkout with `dotnet`), else deploy the prebuilt DLL; kill a running game; start it (Windows: `RainWorld.exe` directly; Linux: under Wine, see `launcher`); wait for the mod heartbeat, then `connect()`. Raises `LaunchError` with the tail of the game log on failure. |
 | `env.connect(wait_ready=True)` | Attach to a running game: liveness check (heartbeat), set `CONNECTED`, optionally wait for `READY`. Raises `GameNotRunningError` if nothing is running. |
 | `env.reset(options={"wipe": True})` | Connects if needed, sends `RESET` (wipe RL save, fresh story game, wait for READY), then does one no-op step and returns `(frame, info)`. `options={"wipe": False}` skips the command and just returns the current frame of the game in progress (requires READY). |
 | `env.step(action)` | One step of `ticks_per_step` physics ticks. Returns `(frame, 0.0, False, False, info)`. |
 | `env.disconnect()` / `env.close()` | Clear `CONNECTED`; the mod hands the game back to normal play. Does not quit the game. |
 | `env.debug_kill(timeout=10)` | **Debug/testing only.** Sends `KILL_PLAYER`: the mod kills the slugcat immediately and acks; the respawn is observed through later `step()` calls (see below). Not part of the RL interface. |
+| `env.debug_enter_shelter(food, timeout=10)` | **Debug/testing only.** Sends `ENTER_SHELTER`: the mod sets the slugcat's food to `food` pips and sends it into its den shelter through the entrance pipe, then acks; the game's own shelter logic decides the sleep (with `food_to_hibernate` pips: stand still away from the entrance -> `cycle_survived`; with fewer: hold `down` 260 ticks -> starving sleep). See docs/PROTOCOL.md "Commands" and `tests/e2e/test_sleep.py`. Not part of the RL interface. |
+| `env.debug_hop_room(exit, timeout=10)` | **Debug/testing only**, for soak tests of room loading. Sends `HOP_ROOM`: the mod sends the slugcat out through exit `exit % n` of its room's `n` usable exits (0-255; draw it from a seeded RNG for a reproducible route) into the neighbouring room, the way walking into that pipe would, then acks. `ready` stays True; `room_index` changes within a few steps and the slugcat comes out of the pipe soon after. `CommandError` if it is dead, already between rooms (in or entering a pipe, region switch under way) or the room has no usable exit. See `tests/e2e/test_transitions.py`. |
+| `env.debug_switch_region(gate=0, timeout=10)` | **Debug/testing only**, for soak tests of region loading. Sends `SWITCH_REGION`: the mod sends the slugcat into gate room `gate % n` of its region's `n` usable gates and acks; from there the game's own gate code (karma requirement skipped) loads the next region. The slugcat ignores input until it is out of the gate room: `region` changes once the new world has loaded (tens of steps), then it leaves the gate room into the new region. `ready` stays True. A death respawns it in its shelter in the old region. |
 
 Constructor keyword knobs: `ready_timeout` (60 s), `frame_timeout` (10 s),
-`reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`.
+`reset_timeout` (90 s), `render_mode="rgb_array"`, `debug_timing`, `config`,
+`instance` (Linux: which of several games running side by side to drive).
 
 ### Reset semantics
 
@@ -259,8 +258,10 @@ All protocol errors derive from `SharedMemoryError`:
   `launch()`.
 - `ReadyTimeoutError` - `READY` never rose within `ready_timeout`.
 - `StepTimeoutError` - mod alive but no frame within `frame_timeout`.
-- `CommandError` - `RESET` / `KILL_PLAYER` was rejected or not acknowledged.
+- `CommandError` - a command (`RESET` or a debug one) was rejected or not acknowledged.
 - `NotConnectedError` - a client operation was used before `connect()`.
+- `ProtocolVersionError` - on connect: the deployed mod DLL is from another version of the
+  library (stale DLL). `launch()` redeploys the packaged mod; `rainworld-rl setup` installs it.
 
 `LaunchError` (from `launcher`) covers build/start failures.
 
@@ -276,7 +277,10 @@ launch_timeout = 120.0
 ```
 
 Lookup order: explicit `load_config(path)` argument > `$RAINWORLD_RL_CONFIG` >
-`./rainworld_rl.toml` > defaults. Derived from `game_dir`: `exe_path`,
+`./rainworld_rl.toml` > `~/.config/rainworld_rl/rainworld_rl.toml` (written by
+`rainworld-rl setup`) > defaults. Linux-only keys: `container` (the Apptainer
+image), `wine_prefix_dir` and `renderer` (`auto`, `cpu`, `wsl`, `virtualgl`; see
+`rainworld_rl.example.toml`). Derived from `game_dir`: `exe_path`,
 `plugins_dir`, `plugin_dll_path`, `bepinex_log`. `build.ps1` reads `game_dir`
 from the same file.
 
@@ -296,9 +300,10 @@ python -m rainworld_rl.launcher --build-only # dotnet build + copy DLL
 python -m rainworld_rl.launcher --kill       # stop a running game
 ```
 
-Steam must be running; the launcher starts `RainWorld.exe` directly. The DLL
-is copied only after the old game process exits because BepInEx keeps plugin
-assemblies locked.
+The Steam client does not need to be running. On Windows the launcher starts
+`RainWorld.exe` directly and copies the DLL only after the old game process
+exits, because BepInEx keeps plugin assemblies locked. On Linux each game runs
+under Wine on its own Xvfb display; `--instance N` runs several side by side.
 
 ## Smoke test
 
@@ -321,7 +326,7 @@ mapping_factory=None)` wraps the mapping directly:
 - `connect(wait_ready=True, ready_timeout=60, liveness_timeout=2, alive_grace=None)` / `disconnect()` - while `MOD_ALIVE` is set a stalled heartbeat is tolerated for `alive_grace` seconds (default `alive_stall_grace` = 15 s: the game's initial load runs synchronously right after launch)
 - `wait_for_alive(timeout)`, `wait_for_ready(timeout)`
 - `send_action(action, ticks)` (bitmask or key vector), `send_action_bits(bits, ticks)`, `send_keys("right", "jump", ticks_per_step=1)`, `wait_for_frame(timeout) -> (frame, ModState)`, `step(action, ticks, timeout)`
-- `send_command(command, timeout)`, `reset_game(timeout)`, `kill_player(timeout)` (debug)
+- `send_command(command, timeout, arg=0)`, `reset_game(timeout)`; debug: `kill_player(timeout)`, `enter_shelter(food, timeout)`, `hop_room(exit, timeout)`, `switch_region(gate, timeout)`
 - `read_state() -> ModState` (whole 64-byte header via one `struct.Struct` read), `set_connected(bool)` (read-modify-write of Python's bit only)
 
 `mapping_factory` lets tests inject a `bytearray`-backed fake; see

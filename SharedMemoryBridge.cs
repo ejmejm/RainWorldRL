@@ -3,7 +3,7 @@ using System.IO.MemoryMappedFiles;
 
 /// <summary>
 /// Manages shared memory communication between the Rain World mod and the Python RL client.
-/// Implements protocol v3 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
+/// Implements protocol v4 (see docs/PROTOCOL.md). All multi-byte values are little-endian.
 ///
 /// Header layout (64 bytes):
 ///   0   u8   sync_flag        0 IDLE, 1 ACTION_READY, 2 FRAME_READY, 3 PROCESSING
@@ -12,10 +12,10 @@ using System.IO.MemoryMappedFiles;
 ///   3   u8   status           shared bitfield; each side only writes its own bits
 ///   4   u32  frame_width      py->mod
 ///   8   u32  frame_height     py->mod
-///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER); mod clears when done
+///   12  u8   command          py->mod (0 NONE, 1 RESET, 2 KILL_PLAYER, 3 ENTER_SHELTER, 4 HOP_ROOM, 5 SWITCH_REGION); mod clears when done
 ///   13  u8   command_result   mod->py (0 none, 1 OK, 2 ERROR)
 ///   14  u8   game_flags       mod->py (b0 IN_SHELTER, b1 CYCLE_SURVIVED edge, b2 RAIN, b3 DIALOG_OPEN)
-///   15  u8   reserved
+///   15  u8   protocol_version mod->py PROTOCOL_VERSION, written as soon as the mapping exists
 ///   16  u32  heartbeat        mod->py, incremented every Unity Update
 ///   20  u32  step_counter     mod->py, incremented once per completed step
 ///   24  u8   karma
@@ -31,12 +31,15 @@ using System.IO.MemoryMappedFiles;
 ///   52  u8   food_to_hibernate mod->py pips needed to hibernate this cycle (= food_max while malnourished)
 ///   53  u8   malnourished     mod->py level: 1 while the save state is malnourished (last sleep was a starving one)
 ///   54  4B   region           mod->py ASCII region acronym of the active world (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
-///   58  6B   reserved
+///   58  u8   command_arg      py->mod argument of the command (ENTER_SHELTER: food pips; HOP_ROOM: exit; SWITCH_REGION: gate), written before command
+///   59  5B   reserved
 ///   64  N    frame            RGB24, top row first
 /// </summary>
 public class SharedMemoryBridge : IDisposable
 {
     public const string SHARED_MEMORY_NAME = "RainWorldRL";
+    // Bump whenever the header layout or the meaning of a field/command changes (with rainworld_rl/shared_memory.py).
+    public const byte PROTOCOL_VERSION = 4;
     public const int HEADER_SIZE = 64;
     public const int MAX_FRAME_WIDTH = 1920;
     public const int MAX_FRAME_HEIGHT = 1080;
@@ -54,6 +57,9 @@ public class SharedMemoryBridge : IDisposable
     public const byte CMD_NONE = 0;
     public const byte CMD_RESET = 1;
     public const byte CMD_KILL_PLAYER = 2;
+    public const byte CMD_ENTER_SHELTER = 3;
+    public const byte CMD_HOP_ROOM = 4;
+    public const byte CMD_SWITCH_REGION = 5;
     public const byte RESULT_NONE = 0;
     public const byte RESULT_OK = 1;
     public const byte RESULT_ERROR = 2;
@@ -68,6 +74,7 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_COMMAND = 12;
     private const int OFFSET_COMMAND_RESULT = 13;
     private const int OFFSET_GAME_FLAGS = 14;
+    private const int OFFSET_PROTOCOL_VERSION = 15;
     private const int OFFSET_HEARTBEAT = 16;
     private const int OFFSET_STEP_COUNTER = 20;
     private const int OFFSET_KARMA = 24;
@@ -83,6 +90,7 @@ public class SharedMemoryBridge : IDisposable
     private const int OFFSET_FOOD_TO_HIBERNATE = 52;
     private const int OFFSET_MALNOURISHED = 53;
     private const int OFFSET_REGION = 54;
+    private const int OFFSET_COMMAND_ARG = 58;
     public const int REGION_SIZE = 4;
     private const int OFFSET_FRAME_DATA = HEADER_SIZE;
 
@@ -136,11 +144,33 @@ public class SharedMemoryBridge : IDisposable
     /// <summary>True while Python holds the CONNECTED bit.</summary>
     public bool IsConnected => (ReadStatus() & STATUS_CONNECTED) != 0;
 
+    /// <summary>
+    /// If set, the mapping is backed by this file instead of the named mapping. Used under Wine,
+    /// where a named mapping is invisible to Linux processes: the launcher points it at a
+    /// /dev/shm file (as a Wine path, e.g. Z:\dev\shm\...) that Python maps too.
+    /// </summary>
+    public const string SHM_PATH_ENV_VAR = "RAINWORLD_RL_SHM";
+
+    /// <summary>Where the mapping lives: the backing file path, or the mapping name.</summary>
+    public string Location { get; }
+
     public SharedMemoryBridge()
     {
         int totalSize = HEADER_SIZE + MAX_FRAME_SIZE;
-        mmf = MemoryMappedFile.CreateOrOpen(SHARED_MEMORY_NAME, totalSize);
+        string path = Environment.GetEnvironmentVariable(SHM_PATH_ENV_VAR);
+        if (string.IsNullOrEmpty(path))
+        {
+            mmf = MemoryMappedFile.CreateOrOpen(SHARED_MEMORY_NAME, totalSize);
+            Location = SHARED_MEMORY_NAME;
+        }
+        else
+        {
+            mmf = MemoryMappedFile.CreateFromFile(path, System.IO.FileMode.OpenOrCreate, null, totalSize);
+            Location = path;
+        }
         accessor = mmf.CreateViewAccessor();
+        // First, so it is there before MOD_ALIVE is ever set; nothing else writes this byte.
+        accessor.Write(OFFSET_PROTOCOL_VERSION, PROTOCOL_VERSION);
 
         // Reset the handshake and our own status bits. Python's CONNECTED bit and
         // the py->mod fields (action_bits, dims, command) are left untouched in case the
@@ -178,6 +208,8 @@ public class SharedMemoryBridge : IDisposable
     }
 
     public byte ReadCommand() => accessor.ReadByte(OFFSET_COMMAND);
+
+    public byte ReadCommandArg() => accessor.ReadByte(OFFSET_COMMAND_ARG);
 
     public void WriteCommand(byte command) => accessor.Write(OFFSET_COMMAND, command);
 

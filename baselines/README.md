@@ -1,6 +1,7 @@
 # Baselines
 
-Reference agents for the Rain World RL environment, starting with PPO. They
+Reference agents for the Rain World RL environment: PPO, plus the exploration
+methods chosen in `docs/EXPLORATION_METHODS.md` (PPO + RND, DCEO). They
 exist to (a) prove the env is trainable end to end and (b) give every later
 exploration / intrinsic-motivation method a number to beat on the same
 metrics. Stack: JAX (CPU) + Equinox + Optax + MLflow + tqdm.
@@ -15,6 +16,8 @@ baselines/
   ppo/play.py           run a checkpoint, greedy or sampled, print the same metrics
   ppo/checkpoints/      <run_id>/model_<step>.eqx + latest.eqx + model_config.json (gitignored)
   random_agent.py       uniform random keys through the same env + metrics
+  ppo_rnd/              PPO + Random Network Distillation (Burda et al. 2019; port of CleanRL ppo_rnd_envpool) - see ppo_rnd/README.md
+  dceo/                 Deep Covering Eigenoptions (Klissarov & Machado 2023) + Wayfarer representation (ALLO + inverse dynamics) - see dceo/README.md
   tests/                game-free pytest suite (uses FakeRainWorldEnv)
 ```
 
@@ -109,13 +112,9 @@ All CLI args are logged as params, plus `run_id`, `ckpt_dir`, `param_count`,
   the trainer only relies on the scalar reward and the `info["reward_terms"]`
   dict (logged per component). `--reward_scale` multiplies the reward before
   GAE.
-* **CPU JAX on Windows.** There is no CUDA jaxlib for native Windows, so JAX
-  runs on CPU here; with one env instance at a few hundred steps/s the game is
-  the bottleneck, not the network (the ~0.4M-parameter CNN update over 1024
-  steps takes a few seconds). GPU JAX needs Linux/WSL, but the env is
-  Windows-only (named shared memory + `RainWorld.exe`), so running the learner
-  on a GPU would mean splitting actor (Windows) and learner (Linux) across
-  processes - not done here.
+* **JAX on CPU or GPU.** There is no CUDA jaxlib for native Windows, so there
+  JAX runs on CPU. The env also runs on Linux and WSL2 (see the top-level
+  README), where the learner can use a GPU build of JAX.
 * **Checkpoints.** `eqx.tree_serialise_leaves` every `--ckpt_interval` env
   steps (and at the end / on Ctrl-C) into `baselines/ppo/checkpoints/<run_id>/`,
   next to a `model_config.json` that `play.py` uses to rebuild the model and

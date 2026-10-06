@@ -29,6 +29,7 @@ from .shared_memory import (
     GameNotRunningError,
     ModState,
     NotConnectedError,
+    ProtocolVersionError,
     ReadyTimeoutError,
     SharedMemoryClient,
     SharedMemoryError,
@@ -61,5 +62,6 @@ __all__ = [
     "StepTimeoutError",
     "ReadyTimeoutError",
     "CommandError",
+    "ProtocolVersionError",
 ]
-__version__ = "0.2.0"
+__version__ = "1.0.0"

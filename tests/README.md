@@ -8,8 +8,9 @@ tests/
   e2e/               drive the real game; auto-marked `e2e`, skipped unless --e2e
 ```
 
-Requirements: Python 3.13, `pip install pytest numpy gymnasium` (see `python/requirements.txt`).
-Run from the repo root (`E:\projects\rainworld_rl`); `pytest.ini` there sets the test paths.
+Requirements: Python >= 3.11, `pip install -e . pytest`. Run from the repo root; `pytest.ini`
+there sets the test paths. On Linux the same commands work once `rainworld-rl setup` has written
+a config (the tests use its `game_dir`, `container` and `renderer`) and `apptainer` is on PATH.
 
 ## Running
 
@@ -53,7 +54,7 @@ Helpers in `tests/harness.py`:
 
 - Launch with build: 30-90 s. `--no-build`: 15-45 s. `--no-launch` connect: < 5 s.
 - One step: a few ms up to ~50 ms; 200 no-op steps < 10 s typically (hard limit 120 s in the test).
-- `reset()`: 10-30 s. The suite currently performs 4 resets (test_reset x3, test_death x1).
+- `reset()`: 10-30 s. The suite currently performs 11 resets (test_reset x5, test_death x2, test_game_state x2, test_sleep x2).
 - Whole `--e2e` run after launch: roughly 1.5-3 minutes.
 
 ## Adding a test

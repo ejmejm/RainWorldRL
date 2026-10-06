@@ -98,32 +98,3 @@ def test_flags_are_bools_and_rain_false_before_timer_expires(env):
             assert isinstance(info[key], bool), (key, info[key])
         if info["ready"] and 0.0 < info["cycle_progress"] < 1.0:
             assert info["rain"] is False, info
-
-
-@pytest.mark.skip(
-    reason="needs a full cycle survival (several minutes of game time and >= food_to_hibernate pips); "
-    "see the docstring for how to run it"
-)
-def test_cycle_survived_edge_is_exactly_one_step(fresh_env):
-    """
-    Structure for the cycle-survived edge test:
-
-    1. fresh_env -> reset(). The Survivor needs 4 pips. Gather them (e.g. a scripted walk to
-       known blue-fruit/batfly spots in the start region), or drive the game with F10 human
-       override until info["food"] >= info["food_to_hibernate"], then release F10.
-    2. Walk into a shelter (info["in_shelter"] True) and hold no-op steps until the rain
-       (info["cycle_progress"] -> 1.0, info["rain"] True) closes the shelter door.
-       At ticks_per_step=1 and the mod's 50x speed this is on the order of 20-40k steps;
-       the cycle length is drawn per cycle by RainCycle (cycleLength is public, so a future
-       debug command could shorten it: set world.rainCycle.timer = cycleLength - 400 from the
-       mod and the door closes within ~400 ticks).
-    3. Step until info["cycle_survived"] is True (bounded); record that step k. Assert
-       results[k+1]["cycle_survived"] is False and stays False for the next ~50 steps (EDGE).
-    4. After the SleepScreen -> Game redirect: info["cycle_number"] == previous + 1,
-       info["malnourished"] is False, info["karma"] went up by one, info["food"] dropped by
-       food_to_hibernate, and info["in_shelter"] is True (you wake up in the same shelter).
-    5. Negative case: repeat with food < food_to_hibernate. The door still closes and the cycle
-       ends, but cycle_survived must stay False and info["malnourished"] becomes True with
-       info["food_to_hibernate"] == info["food_max"] for the following cycle.
-    """
-    raise NotImplementedError

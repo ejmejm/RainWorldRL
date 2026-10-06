@@ -6,7 +6,7 @@ Lifecycle
 ``RainWorldEnv(...)`` is cheap and never touches the game. Attach with one of:
 
 * ``env.launch()``  - build the mod, (re)start ``RainWorld.exe``, wait for the
-  mod, then connect. Heavy; Steam must be running.
+  mod, then connect. Heavy.
 * ``env.connect()`` - attach to a game that is already running.
 * ``env.reset()``   - connects if needed (raising ``GameNotRunningError`` with
   a hint to call ``launch()`` if nothing is running), sends the ``RESET``
@@ -21,6 +21,11 @@ edge taken straight from the mod's status bit.
 ``env.debug_kill()`` is a **debug/testing** hook that kills the slugcat on
 demand so the death -> respawn flow can be exercised deterministically. It is
 not part of the RL interface and is not something an agent should call.
+``env.debug_enter_shelter(food)`` is its counterpart for the sleep flow: it
+sends the slugcat into its den shelter so a real hibernation can be tested.
+``env.debug_hop_room(exit)`` and ``env.debug_switch_region(gate)`` move the
+slugcat into a neighbouring room or region through the game's own transition
+code, for soak tests of room and region loading.
 
 Observation = RGB frame only. All other state is in ``info``:
 ``player_dead``, ``karma``, ``karma_cap``, ``food``, ``food_max``,
@@ -39,16 +44,10 @@ The classic Discrete(18) set is available as ``rainworld_rl.wrappers.DiscreteAct
 While the human override (F10 in game) is active, ``step()`` blocks until it is
 released instead of timing out, and logs once via ``logging``.
 
-Importing / registration
-------------------------
-The repository directory is the package (``rainworld_rl``) and this module
-lives in its ``python`` subpackage, so the gym entry point is
-``rainworld_rl.rainworld_env:RainWorldEnv``. That requires the *parent*
-of the repository to be on ``sys.path`` (e.g. ``E:/projects`` for
-``E:/projects/rainworld_rl``), which is also what makes
-``from rainworld_rl import RainWorldEnv`` work. ``gym.make("RainWorld-v0")``
-only works after this module has been imported once (the ``gym.register``
-call is at the bottom of this file).
+Registration
+------------
+``gym.make("RainWorld-v0")`` works once ``rainworld_rl`` has been imported
+(the ``gym.register`` call is at the bottom of this file).
 """
 
 from __future__ import annotations
@@ -68,6 +67,7 @@ from .shared_memory import (
     ModState,
     SharedMemoryClient,
     action_to_bits,
+    default_shm_path,
 )
 
 
@@ -96,7 +96,7 @@ class RainWorldEnv(gym.Env):
         self,
         frame_width: int = 160,
         frame_height: int = 90,
-        ticks_per_step: int = 1,
+        ticks_per_step: int = 4,
         *,
         ready_timeout: float = 60.0,
         frame_timeout: float = 10.0,
@@ -105,12 +105,14 @@ class RainWorldEnv(gym.Env):
         debug_timing: bool = False,
         config: Optional[Config] = None,
         client: Optional[SharedMemoryClient] = None,
+        instance: int = 0,
     ):
         """
         Args:
             frame_width: Observation width in pixels (1..1920).
             frame_height: Observation height in pixels (1..1080).
-            ticks_per_step: Physics ticks per ``step()`` (1..255).
+            ticks_per_step: Physics ticks per ``step()`` (1..255; the game runs 40
+                ticks/s, so the default 4 is 100 ms of game time per step).
             ready_timeout: Seconds ``connect()`` waits for the mod's READY bit.
             frame_timeout: Seconds ``step()`` waits for a frame (not counted
                 while the human override is active).
@@ -121,6 +123,8 @@ class RainWorldEnv(gym.Env):
                 ``rainworld_rl.toml`` / defaults by ``launch()`` if None.
             client: Pre-built ``SharedMemoryClient`` (used by unit tests to
                 inject a fake mapping). Normally None.
+            instance: Which game instance to drive (Linux only; see
+                ``launcher``). Each has its own shared memory.
         """
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -135,6 +139,7 @@ class RainWorldEnv(gym.Env):
         self.render_mode = render_mode
         self.debug_timing = debug_timing
         self.config = config
+        self.instance = instance
 
         self.observation_space = spaces.Box(
             low = 0, high = 255, shape = (frame_height, frame_width, 3), dtype = np.uint8
@@ -142,7 +147,7 @@ class RainWorldEnv(gym.Env):
         self.action_space = spaces.MultiBinary(NUM_KEYS)
 
         self._client: SharedMemoryClient = client or SharedMemoryClient(
-            frame_width, frame_height, debug_timing = debug_timing
+            frame_width, frame_height, debug_timing = debug_timing, shm_path = default_shm_path(instance)
         )
         self._last_frame: Optional[np.ndarray] = None
         self._last_state: Optional[ModState] = None
@@ -174,19 +179,21 @@ class RainWorldEnv(gym.Env):
             self._client.connect(wait_ready = wait_ready, ready_timeout = self.ready_timeout)
         except GameNotRunningError as e:
             raise GameNotRunningError(
-                f"{e} Start Rain World with the RainWorldRL mod (Steam running), "
+                f"{e} Start Rain World with the RainWorldRL mod, "
                 "or call env.launch() to build + start it automatically."
             ) from e
 
-    def launch(self, *, build: bool = True, restart: bool = True, wait_ready: bool = True) -> None:
+    def launch(self, *, build: Optional[bool] = None, restart: bool = True, wait_ready: bool = True) -> None:
         """
         Build the mod, (re)start Rain World, wait for the mod and connect.
 
-        This is the one heavy call. Steam must already be running. Uses
+        This is the one heavy call. Uses
         ``self.config`` (or loads ``rainworld_rl.toml`` / defaults).
 
         Args:
-            build: Run ``dotnet build`` and deploy the DLL first.
+            build: ``dotnet build`` and deploy the DLL first. None (default):
+                build when possible, else deploy the packaged prebuilt DLL;
+                False: leave the deployed DLL alone (see ``launcher.launch``).
             restart: Kill a running game before starting a new one.
             wait_ready: Wait for READY as part of the connect.
 
@@ -201,7 +208,7 @@ class RainWorldEnv(gym.Env):
 
         if self.connected:
             self.disconnect()
-        self._game_process = launcher.launch(self.config, build = build, restart = restart)
+        self._game_process = launcher.launch(self.config, build = build, restart = restart, instance = self.instance)
         self.connect(wait_ready = wait_ready)
 
     def disconnect(self) -> None:
@@ -314,6 +321,79 @@ class RainWorldEnv(gym.Env):
         logger.info("Sending KILL_PLAYER (debug)...")
         self._client.kill_player(timeout = timeout)
 
+    def debug_enter_shelter(self, food: int, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: give the slugcat ``food`` pips and send it into
+        its den shelter through the entrance pipe (``ENTER_SHELTER``).
+
+        Intended for tests that need a real hibernation: from there the game's
+        own shelter logic decides. With ``info["food_to_hibernate"]`` pips the
+        slugcat hibernates once it stands still away from the entrance
+        (``cycle_survived`` edge, then the cycle reloads in the shelter); with
+        fewer (but at least one) it sleeps starving if DOWN is held for 260
+        ticks. Not part of the RL interface.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (not in a game, no live
+                player, den shelter not in the current region) or did not ack
+                within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.info("Sending ENTER_SHELTER (debug, food=%d)...", food)
+        self._client.enter_shelter(food, timeout = timeout)
+
+    def debug_hop_room(self, exit: int, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: send the slugcat out through one of its room's
+        exits into the neighbouring room (``HOP_ROOM``), as if it had walked
+        into that pipe. Not part of the RL interface.
+
+        ``exit`` (0-255) picks the exit: ``exit % n`` of the room's ``n``
+        usable exits (exits that lead nowhere are skipped), so exits drawn
+        from a seeded RNG give a reproducible route. Returns once the slugcat
+        is in the pipe; ``info["room_index"]`` changes once the next room has
+        loaded (usually within a few steps) and the slugcat comes out of the
+        pipe a few steps later. ``ready`` stays True throughout.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (not in a game, no live
+                player in a room, already on its way out of it, a region switch
+                in progress, no usable exit) or did not ack within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.debug("Sending HOP_ROOM (debug, exit=%d)...", exit)
+        self._client.hop_room(exit, timeout = timeout)
+
+    def debug_switch_region(self, gate: int = 0, timeout: float = 10.0) -> None:
+        """
+        **Debug/testing only**: take the slugcat through a region gate of its
+        region into the neighbouring region (``SWITCH_REGION``), with the
+        game's own gate and world-loading code (the karma requirement is
+        skipped). Not part of the RL interface.
+
+        ``gate`` (0-255) picks the gate: ``gate % n`` of the region's ``n``
+        usable gates. Returns once the slugcat is on its way to the gate room.
+        From then on it ignores input; ``info["region"]`` changes when the next
+        region has loaded, then the slugcat leaves the gate room into the new
+        region (``room_index`` changes again) and takes input again. ``ready``
+        stays True throughout; other debug moves are rejected until the
+        slugcat is out of the gate room.
+
+        Raises:
+            GameNotRunningError: not connected.
+            CommandError: the mod rejected the command (as for
+                ``debug_hop_room``, or the region has no usable gate) or did
+                not ack within ``timeout``.
+        """
+        if not self.connected:
+            raise GameNotRunningError("Environment is not connected; call reset(), connect() or launch() first")
+        logger.info("Sending SWITCH_REGION (debug, gate=%d)...", gate)
+        self._client.switch_region(gate, timeout = timeout)
+
     # -- knobs -------------------------------------------------------------
 
     def set_ticks_per_step(self, ticks: int) -> None:
@@ -330,7 +410,7 @@ class RainWorldEnv(gym.Env):
         )
 
 
-# Register with Gymnasium. See the module docstring for the import-path caveat.
+# Register with Gymnasium.
 _ENV_ID = "RainWorld-v0"
 if _ENV_ID not in gym.registry:
     gym.register(id = _ENV_ID, entry_point = "rainworld_rl.rainworld_env:RainWorldEnv")

@@ -10,7 +10,7 @@ using UnityEngine;
 
 /// <summary>
 /// Rain World RL - Turns Rain World into a reinforcement learning environment.
-/// Communicates with Python via shared memory (protocol v3, docs/PROTOCOL.md).
+/// Communicates with Python via shared memory (protocol v4, docs/PROTOCOL.md).
 ///
 /// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
 /// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
@@ -30,11 +30,14 @@ public class RainWorldRL : BaseUnityPlugin
     private StepController stepController;
     private SaveRedirector saveRedirector;
     private GameFlowController gameFlow;
+    private WorkerThreadFix workerThreadFix;
+    private readonly CoreWarmer coreWarmer = new CoreWarmer();
 
     // Config
     private ConfigEntry<string> cfgSlugcat;
     private ConfigEntry<string> cfgSaveName;
     private ConfigEntry<float> cfgSpeedMultiplier;
+    private ConfigEntry<int> cfgRenderScale;
     private ConfigEntry<bool> cfgVerboseLogging;
 
     // State
@@ -58,14 +61,21 @@ public class RainWorldRL : BaseUnityPlugin
                 "Name of the isolated RL save profile. Stored under BepInEx/plugins/RainWorldRL/saves/<name>/.");
             cfgSpeedMultiplier = Config.Bind("Simulation", "SpeedMultiplier", 50f,
                 new ConfigDescription("Game-time speed multiplier while a step is running.", new AcceptableValueRange<float>(1f, 1000f)));
+            cfgRenderScale = Config.Bind("Simulation", "RenderScale", 2,
+                new ConfigDescription("While the agent is in control the game renders straight into a texture this many times the " +
+                    "observation size (same field of view), averaged down to the observation. 0 renders at the game's own 1366x768.",
+                    new AcceptableValueRange<int>(0, 8)));
             cfgVerboseLogging = Config.Bind("Logging", "Verbose", false,
                 "Log every process switch and other high-frequency diagnostics.");
 
             sharedMemory = new SharedMemoryBridge();
-            Logger.LogInfo("Shared memory bridge created");
+            Logger.LogInfo($"Shared memory bridge created ({sharedMemory.Location})");
 
             inputInjector = new InputInjector();
-            frameCapture = new FrameCapture(SharedMemoryBridge.DEFAULT_FRAME_WIDTH, SharedMemoryBridge.DEFAULT_FRAME_HEIGHT);
+            frameCapture = new FrameCapture(SharedMemoryBridge.DEFAULT_FRAME_WIDTH, SharedMemoryBridge.DEFAULT_FRAME_HEIGHT)
+            {
+                RenderScale = cfgRenderScale.Value,
+            };
 
             stepController = new StepController(sharedMemory, inputInjector, frameCapture, Logger)
             {
@@ -83,8 +93,12 @@ public class RainWorldRL : BaseUnityPlugin
                 SlugcatName = cfgSlugcat.Value,
                 VerboseLogging = cfgVerboseLogging.Value,
             };
+            workerThreadFix = new WorkerThreadFix(Logger);
+            if (coreWarmer.Enabled)
+                Logger.LogInfo($"Core warmer enabled ({CoreWarmer.ENV_VAR}=1)");
 
             cfgSpeedMultiplier.SettingChanged += (s, e) => stepController.SpeedMultiplier = cfgSpeedMultiplier.Value;
+            cfgRenderScale.SettingChanged += (s, e) => frameCapture.RenderScale = cfgRenderScale.Value;
             cfgSlugcat.SettingChanged += (s, e) => gameFlow.SlugcatName = cfgSlugcat.Value;
             cfgSaveName.SettingChanged += (s, e) => saveRedirector.SaveName = cfgSaveName.Value;
             cfgVerboseLogging.SettingChanged += (s, e) =>
@@ -129,6 +143,7 @@ public class RainWorldRL : BaseUnityPlugin
     void OnDestroy()
     {
         ForceStopRLMode("plugin destroyed");
+        coreWarmer.SetActive(false);
         UninstallHooks();
 
         if (modsInitHookSubscribed)
@@ -165,6 +180,7 @@ public class RainWorldRL : BaseUnityPlugin
             inputInjector.Install();
             saveRedirector.Install();
             gameFlow.Install();
+            workerThreadFix.Install();
             stepController.Install();
             hooksInstalled = true;
             Logger.LogInfo("Game hooks installed");
@@ -180,6 +196,7 @@ public class RainWorldRL : BaseUnityPlugin
         if (!hooksInstalled)
             return;
 
+        workerThreadFix?.Uninstall();
         stepController?.Uninstall();
         gameFlow?.Uninstall();
         saveRedirector?.Uninstall();
@@ -194,6 +211,8 @@ public class RainWorldRL : BaseUnityPlugin
         rainWorld = self;
         stepController.OnRainWorldUpdate(self);
         orig(self);
+        if (stepControllerEnabled)
+            stepController.RunFastSteps(self);
     }
 
     void Update()
@@ -287,6 +306,45 @@ public class RainWorldRL : BaseUnityPlugin
             sharedMemory.WriteCommandResult(killed ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
             sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
         }
+        else if (command == SharedMemoryBridge.CMD_ENTER_SHELTER)
+        {
+            // Debug/testing aid: send player 0 into its den shelter with command_arg food pips and ack at once.
+            // The arrival and any sleep are observed through subsequent steps.
+            bool sent = false;
+            try
+            {
+                sent = gameFlow.EnterShelter(rainWorld, sharedMemory.ReadCommandArg());
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"ENTER_SHELTER failed: {ex}");
+            }
+            if (!sent)
+                Logger.LogWarning("ENTER_SHELTER command could not be applied; reporting ERROR");
+            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+        }
+        else if (command == SharedMemoryBridge.CMD_HOP_ROOM || command == SharedMemoryBridge.CMD_SWITCH_REGION)
+        {
+            // Debug/testing aids: send player 0 into a neighbouring room / region (command_arg picks the exit / gate)
+            // and ack once it is on its way. The arrival is observed through subsequent steps.
+            bool hop = command == SharedMemoryBridge.CMD_HOP_ROOM;
+            string name = hop ? "HOP_ROOM" : "SWITCH_REGION";
+            bool sent = false;
+            try
+            {
+                int arg = sharedMemory.ReadCommandArg();
+                sent = hop ? gameFlow.HopRoom(rainWorld, arg) : gameFlow.SwitchRegion(rainWorld, arg);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"{name} failed: {ex}");
+            }
+            if (!sent)
+                Logger.LogWarning($"{name} command could not be applied; reporting ERROR");
+            sharedMemory.WriteCommandResult(sent ? SharedMemoryBridge.RESULT_OK : SharedMemoryBridge.RESULT_ERROR);
+            sharedMemory.WriteCommand(SharedMemoryBridge.CMD_NONE);
+        }
         else if (command != SharedMemoryBridge.CMD_NONE && command != SharedMemoryBridge.CMD_RESET)
         {
             Logger.LogWarning($"Unknown command {command}; reporting ERROR");
@@ -308,6 +366,9 @@ public class RainWorldRL : BaseUnityPlugin
 
         if (stepControllerEnabled)
             stepController.ProcessUpdate();
+        stepController.UpdateRendering();
+        frameCapture.SetAgentInControl(stepController.AgentInControl);
+        coreWarmer.SetActive(stepController.AgentInControl);
     }
 
     void FixedUpdate()

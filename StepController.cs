@@ -1,19 +1,27 @@
 using System;
+using System.Reflection;
+using System.Threading;
 using BepInEx.Logging;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
 /// Controls the game simulation step-by-step, driven by the Python RL agent.
-/// Runs physics at a high timescale during a step and pauses (timescale 0) between steps
-/// while the game is READY; while not READY (menus, loading, respawn) time runs at 1x so the
-/// game can get itself back into a playable state.
 ///
-/// Step lifecycle (sync flag transitions):
+/// While the game is READY and the agent has control (the normal case), steps run in
+/// <see cref="RunFastSteps"/>, inside the RainWorld.Update hook: time stays frozen (timescale 0) and
+/// each step runs exactly ticksPerStep game ticks, renders the game camera once and captures it, all
+/// within one Unity frame; several steps can share a frame. Step lifecycle (sync flag transitions):
 ///   Python writes action_bits + ACTION_READY
-///   -> ProcessUpdate consumes action once, writes PROCESSING, unpauses
-///   -> ProcessFixedUpdate counts ticks, pauses when ticksPerStep reached
-///   -> ProcessPostRender captures frame, writes game state + status, step_counter++, writes FRAME_READY last
+///   -> RunFastSteps consumes the action, writes PROCESSING, runs the ticks (ProcessManager.Update)
+///   -> renders the camera; ProcessPostRender (its post-render callback) captures the frame, writes
+///      game state + status, step_counter++, writes FRAME_READY last
 ///   -> Python reads frame, writes IDLE
+///
+/// While not READY (menus, loading, respawn) or under human override, time runs at 1x between steps
+/// so the game can get itself back into a playable state, and steps take the per-frame path:
+///   ProcessUpdate consumes the action, unpauses -> ProcessFixedUpdate counts FixedUpdates, pauses
+///   when ticksPerStep reached -> ProcessPostRender captures the next rendered frame.
 ///
 /// Per-step game state (offsets 24..53 and the IN_SHELTER / RAIN / CYCLE_SURVIVED game_flags bits):
 ///   food_max / food_to_hibernate : StoryGameSession.characterStats.maxFood / .foodToHibernate
@@ -29,7 +37,7 @@ using UnityEngine;
 ///   CYCLE_SURVIVED (edge)        : latched by the On.RainWorldGame.Win hook (RainWorldGame.cs:1578) when the
 ///                                  player hibernated with enough food (malnourished == false; ShelterDoor.cs:1788),
 ///                                  reported on the next frame written and then cleared. A starving sleep
-///                                  (Win(malnourished: true) -> StarveScreen) does not count; it is visible as
+///                                  (Win(malnourished: true), also via SleepScreen) does not count; it is visible as
 ///                                  cycle_number + 1 together with malnourished == 1.
 ///   region                       : game.overWorld.activeWorld.region.name (World.cs:278, Region.cs:148), the
 ///                                  region acronym ("SU", "HI", ...); empty while no world is loaded.
@@ -46,6 +54,28 @@ public class StepController
     /// <summary>Rain World treats fpsCap > 120 as "unlimited" (InitializationScreen.cs:619, OptionsMenu.cs:860).</summary>
     private const int FPS_CAP_UNLIMITED = 121;
 
+    /// <summary>OnDemandRendering.renderFrameInterval while nothing needs to be seen (see <see cref="UpdateRendering"/>).</summary>
+    private const int SKIP_RENDER_INTERVAL = 1000;
+
+    /// <summary>How long <see cref="RunFastSteps"/> waits inside the frame for the next action before
+    /// handing the frame back (a fast agent's next action usually arrives well within this).</summary>
+    private const double SPIN_WAIT_MS = 5.0;
+
+    /// <summary>Longest stretch of steps in one frame, so Unity and the game's per-frame work
+    /// (GameFlowController, commands, the F10 key) still run at least ~20 times a second.</summary>
+    private const double FRAME_BUDGET_MS = 50.0;
+
+    private static readonly FieldInfo timeStackerField =
+        typeof(MainLoopProcess).GetField("myTimeStacker", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    // Futile turns the draw code's sprite changes into mesh data in its own Update (Redraw) and LateUpdate (mesh
+    // upload), once per Unity frame. A fast step runs both before rendering by hand, or the render would show
+    // the geometry from the start of the frame.
+    private static readonly Action<Futile> futileUpdate = (Action<Futile>)Delegate.CreateDelegate(
+        typeof(Action<Futile>), typeof(Futile).GetMethod("Update", BindingFlags.NonPublic | BindingFlags.Instance));
+    private static readonly Action<Futile> futileLateUpdate = (Action<Futile>)Delegate.CreateDelegate(
+        typeof(Action<Futile>), typeof(Futile).GetMethod("LateUpdate", BindingFlags.NonPublic | BindingFlags.Instance));
+
     private readonly SharedMemoryBridge sharedMemory;
     private readonly InputInjector inputInjector;
     private readonly FrameCapture frameCapture;
@@ -57,6 +87,7 @@ public class StepController
     private int ticksPerStep = 1;
     private bool stepInProgress = false;         // Action consumed, physics running
     private bool waitingForFrameCapture = false; // Physics done, awaiting post-render
+    private int forcedTicks = 0;                  // ticks the next RainWorldGame.RawUpdate runs (fast path)
 
     // Cached game instance (set via OnRainWorldUpdate)
     private RainWorld rainWorld;
@@ -88,6 +119,9 @@ public class StepController
     /// </summary>
     public bool HoldWhenIdle { get; set; } = false;
 
+    /// <summary>The agent drives the game: RL mode on, no human override, game READY (frozen between steps).</summary>
+    public bool AgentInControl => enabled && !paused && HoldWhenIdle;
+
     public bool VerboseLogging { get; set; } = false;
 
     public bool IsEnabled => enabled;
@@ -110,6 +144,7 @@ public class StepController
             return;
 
         On.RainWorldGame.Win += RainWorldGame_Win;
+        On.MainLoopProcess.RawUpdate += MainLoopProcess_RawUpdate;
         hooksInstalled = true;
     }
 
@@ -119,13 +154,14 @@ public class StepController
             return;
 
         On.RainWorldGame.Win -= RainWorldGame_Win;
+        On.MainLoopProcess.RawUpdate -= MainLoopProcess_RawUpdate;
         hooksInstalled = false;
     }
 
     /// <summary>
     /// RainWorldGame.Win is the hibernation path (ShelterDoor.cs:1788 and the Watcher warp/echo paths).
     /// It is a no-op while a process switch is already pending (RainWorldGame.cs:1581), so only latch
-    /// when it actually ran. malnourished == true is the starving sleep (StarveScreen) and is not counted.
+    /// when it actually ran. malnourished == true is the starving sleep and is not counted.
     /// </summary>
     private void RainWorldGame_Win(On.RainWorldGame.orig_Win orig, RainWorldGame self, bool malnourished, bool fromWarpPoint)
     {
@@ -236,6 +272,7 @@ public class StepController
         pendingCycleSurvived = false;
 
         enabled = false;
+        OnDemandRendering.renderFrameInterval = 1;
         log?.LogInfo("[StepController] Disabled");
     }
 
@@ -273,13 +310,23 @@ public class StepController
             return false;
         }
 
-        if (!sharedMemory.IsActionReady())
+        if (!sharedMemory.IsActionReady() || CanFastStep)
         {
+            // While READY, RunFastSteps services the actions
             Time.timeScale = HoldWhenIdle ? 0f : 1f;
             return false;
         }
 
-        // Consume the action exactly once
+        ConsumeAction();
+        stepInProgress = true;
+        Time.timeScale = SpeedMultiplier;
+
+        return true;
+    }
+
+    /// <summary>Consumes the pending action exactly once and applies it to the input override.</summary>
+    private void ConsumeAction()
+    {
         uint actionBits = sharedMemory.ReadActionBits();
         ticksPerStep = sharedMemory.ReadTicksPerStep();
         sharedMemory.SignalProcessing();
@@ -292,10 +339,109 @@ public class StepController
             log?.LogInfo("[StepController] Pause menu was open while the agent is in control; dismissing it");
 
         currentTick = 0;
-        stepInProgress = true;
-        Time.timeScale = SpeedMultiplier;
+    }
 
-        return true;
+    /// <summary>The fast path applies: RL mode on, game READY, agent in control, a game camera to render.</summary>
+    private bool CanFastStep => AgentInControl && Camera.main != null;
+
+    /// <summary>
+    /// Fast path, called from the RainWorld.Update hook once per frame: services whole steps inside this
+    /// frame. Each step consumes the action, runs exactly ticksPerStep game ticks through
+    /// ProcessManager.Update (see <see cref="MainLoopProcess_RawUpdate"/>), renders the game camera once
+    /// and captures it (<see cref="ProcessPostRender"/>, via the camera's post-render callback). It then
+    /// waits up to SPIN_WAIT_MS for the next action in the same frame, so a fast agent pays no Unity frame
+    /// overhead per step. It hands the frame back when no action comes in time, after FRAME_BUDGET_MS,
+    /// when a command is pending, or when the game leaves the playable state (death, game over, a process
+    /// switch), which the per-frame flow (GameFlowController) handles.
+    /// </summary>
+    public void RunFastSteps(RainWorld rw)
+    {
+        if (!CanFastStep || stepInProgress || waitingForFrameCapture || rw.processManager == null)
+            return;
+
+        Camera cam = Camera.main;
+        long frameStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        long waitStart = frameStart;
+        while (true)
+        {
+            if (!sharedMemory.IsActionReady())
+            {
+                if (ElapsedMs(waitStart) >= SPIN_WAIT_MS || ElapsedMs(frameStart) >= FRAME_BUDGET_MS ||
+                    sharedMemory.ReadCommand() != SharedMemoryBridge.CMD_NONE || !sharedMemory.IsConnected)
+                    return;
+                Thread.Yield();
+                continue;
+            }
+
+            ConsumeAction();
+            forcedTicks = ticksPerStep;
+            rw.processManager.Update(ticksPerStep / 40f); // dt = the ticks' game time (shader clock, session timer)
+            forcedTicks = 0;
+
+            futileUpdate(Futile.instance);
+            futileLateUpdate(Futile.instance);
+            waitingForFrameCapture = true;
+            cam.Render();
+            if (waitingForFrameCapture)
+                ProcessPostRender(); // the post-render callback did not capture (should not happen)
+
+            if (!StillPlayable(rw) || ElapsedMs(frameStart) >= FRAME_BUDGET_MS)
+                return;
+            waitStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+    }
+
+    private static double ElapsedMs(long since) =>
+        (System.Diagnostics.Stopwatch.GetTimestamp() - since) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>Story game running with a live player and no game-over prompt or process switch pending.</summary>
+    private static bool StillPlayable(RainWorld rw)
+    {
+        ProcessManager pm = rw.processManager;
+        if (!(pm.currentMainLoop is RainWorldGame game) || pm.upcomingProcess != null || game.GameOverModeActive)
+            return false;
+        AbstractCreature player = GameFlowController.GetPlayer0(pm);
+        return player != null && player.realizedCreature != null && !IsDead(player);
+    }
+
+    /// <summary>
+    /// During a fast step the game's RawUpdate runs exactly the step's ticks (with the Rewired update between
+    /// ticks, as the original does) and one GrafUpdate at the unchanged time stacker. The original turns dt
+    /// into ticks through a time accumulator, at most 3 per call; RainWorldGame.RawUpdate's own work before
+    /// base.RawUpdate (session timer, slow-motion bookkeeping) still runs with the step's dt.
+    /// </summary>
+    private void MainLoopProcess_RawUpdate(On.MainLoopProcess.orig_RawUpdate orig, MainLoopProcess self, float dt)
+    {
+        if (forcedTicks <= 0 || !(self is RainWorldGame))
+        {
+            orig(self, dt);
+            return;
+        }
+
+        int ticks = forcedTicks;
+        forcedTicks = 0;
+        for (int i = 0; i < ticks; i++)
+        {
+            if (i > 0)
+                self.manager.rainWorld.RunRewiredUpdate();
+            self.Update();
+        }
+        self.GrafUpdate((float)timeStackerField.GetValue(self));
+    }
+
+    /// <summary>
+    /// Called every Unity Update, after <see cref="ProcessUpdate"/>, and right after a capture. While the game
+    /// is frozen between steps and during a step's ticks nothing new needs to be seen, so rendering is skipped;
+    /// only the capture is rendered. Matters most with software rendering (Linux/Wine without a GPU), where
+    /// each frame costs several cores. Human override and the not-READY flow (menus, loading, respawn) render
+    /// every frame. A new interval takes effect on the next frame, so the frame that completes a step is not
+    /// rendered: the capture happens one frame later, which shows the same state because time is frozen
+    /// (timeScale 0) as soon as the step completes.
+    /// </summary>
+    public void UpdateRendering()
+    {
+        bool render = !AgentInControl || waitingForFrameCapture;
+        OnDemandRendering.renderFrameInterval = render ? 1 : SKIP_RENDER_INTERVAL;
     }
 
     /// <summary>Called in FixedUpdate to track physics ticks. Returns true when the step completes.</summary>
@@ -358,6 +504,7 @@ public class StepController
         waitingForFrameCapture = false;
         if (!paused)
             Time.timeScale = HoldWhenIdle ? 0f : 1f;
+        UpdateRendering(); // stop rendering from the next frame on
     }
 
     /// <summary>

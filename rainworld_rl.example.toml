@@ -7,6 +7,7 @@
 # Use forward slashes (or escaped backslashes) in paths.
 
 # Rain World installation directory (the folder containing RainWorld.exe).
+# Default on Linux: ~/.local/share/rainworld_rl/game
 # Derived from it: RainWorld.exe, BepInEx/plugins, BepInEx/LogOutput.log.
 game_dir = "Z:/SteamLibrary/steamapps/common/Rain World"
 
@@ -16,3 +17,19 @@ launch_timeout = 120.0
 # Where the mod keeps the RL save. Informational only: the mod decides, this
 # just tells Python where to look. Defaults to <game_dir>/BepInEx/plugins/RainWorldRL/saves.
 # rl_save_dir = "Z:/SteamLibrary/steamapps/common/Rain World/BepInEx/plugins/RainWorldRL/saves"
+
+# Linux only. Apptainer image providing Wine + Xvfb (see container/). Omit to
+# run wine and Xvfb from the host's PATH.
+# container = "~/.local/share/rainworld_rl/rainworld-rl.sif"
+
+# Linux only. One Wine prefix per game instance is kept here.
+# wine_prefix_dir = "~/.local/share/rainworld_rl/wine"
+
+# Linux only. How the game is rendered:
+#   "auto"       default: "virtualgl" when an NVIDIA GPU is visible, else "wsl" on WSL2,
+#                else "cpu"
+#   "cpu"        DXVK on Mesa lavapipe, on the CPU (works everywhere)
+#   "wsl"        WSL2's GPU through Mesa's d3d12 driver
+#   "virtualgl"  a GPU's EGL device through VirtualGL (NVIDIA proprietary driver,
+#                bound in with apptainer --nv; AMD/Intel via Mesa on /dev/dri, untested)
+# renderer = "auto"

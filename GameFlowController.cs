@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using BepInEx.Logging;
 using UnityEngine;
@@ -53,6 +54,16 @@ using UnityEngine;
 ///
 /// KILL_PLAYER (debug command): <see cref="KillPlayer"/> calls Player.Die on a realized player 0 and
 /// the ordinary death flow above takes over. The ack only confirms the kill was applied.
+///
+/// ENTER_SHELTER (debug command): <see cref="EnterShelter"/> sets player 0's food and sends it through the
+/// entrance pipe of its den shelter; the game's own shelter logic then decides whether and how it sleeps.
+///
+/// HOP_ROOM (debug command): <see cref="HopRoom"/> sends player 0 out through one of its room's exits into the
+/// neighbouring room, the way walking through that pipe would.
+///
+/// SWITCH_REGION (debug command): <see cref="SwitchRegion"/> sends player 0 into a region gate room of its region;
+/// <see cref="UpdateRegionSwitch"/> then starts the gate (skipping its karma check), lets the game load the next region
+/// and sends the slugcat out of the gate room into it.
 /// </summary>
 public class GameFlowController
 {
@@ -73,6 +84,13 @@ public class GameFlowController
         Wipe,
         WaitForWipe,
         WaitForNewGame,
+    }
+
+    private enum SwitchState
+    {
+        None,
+        WaitForGateRoom,
+        WaitForWorld,
     }
 
     /// <summary>Fade-to-black length for every process switch while RL mode is on (game default 0.45 s).</summary>
@@ -130,6 +148,12 @@ public class GameFlowController
     private RainWorldGame gameOverGame = null;
     private int gameOverClock = 0;
     private bool gameOverAdvanced = false;
+
+    // SWITCH_REGION bookkeeping
+    private SwitchState switchState = SwitchState.None;
+    private RainWorldGame switchGame = null;
+    private AbstractRoom switchGateRoom = null;
+    private RegionGate switchGate = null;
 
     /// <summary>Slugcat to play as, by ExtEnum name (e.g. "White", "Yellow", "Red").</summary>
     public string SlugcatName { get; set; } = "White";
@@ -389,6 +413,270 @@ public class GameFlowController
         return true;
     }
 
+    /// <summary>
+    /// Debug ENTER_SHELTER command: sets player 0's food to <paramref name="food"/> pips and sends it into its den
+    /// shelter (SaveState.denPosition, or SaveState.GetFinalFallbackShelter while the den is not a shelter, e.g. on a
+    /// fresh save) through the entrance pipe (<see cref="SendThroughShortcut"/>), clearing Player.stillInStartShelter
+    /// (Player.cs:6963). The game's own shelter logic (Player.cs:5719-5787) then decides the sleep. Returns false
+    /// (caller reports ERROR) when <see cref="MovablePlayer0"/> rejects or the den shelter is not in the current region.
+    /// </summary>
+    public bool EnterShelter(RainWorld rw, int food)
+    {
+        Player player = MovablePlayer0(rw, "ENTER_SHELTER");
+        if (player == null)
+            return false;
+
+        RainWorldGame game = player.room.game;
+        SaveState save = game.GetStorySession.saveState;
+        AbstractRoom shelter = string.IsNullOrEmpty(save.denPosition) ? null : game.world.GetAbstractRoom(save.denPosition);
+        if (shelter == null || !shelter.shelter)
+            shelter = game.world.GetAbstractRoom(SaveState.GetFinalFallbackShelter(save.saveStateNumber));
+        if (shelter == null || !shelter.shelter)
+        {
+            log?.LogWarning($"[GameFlow] ENTER_SHELTER rejected: the den shelter is not in region {game.world.name}");
+            return false;
+        }
+
+        player.playerState.foodInStomach = Mathf.Clamp(food, 0, player.MaxFoodInStomach);
+        player.playerState.quarterFoodPoints = 0;
+        log?.LogInfo($"[GameFlow] ENTER_SHELTER: player 0 {player.room.abstractRoom.name} -> {shelter.name} with {player.FoodInStomach} food");
+
+        // Node 0 is a shelter's entrance (Player.cs:5768).
+        SendThroughShortcut(player, shelter, 0);
+        return true;
+    }
+
+    /// <summary>
+    /// Debug HOP_ROOM command: sends player 0 through usable exit <paramref name="exit"/> % (number of usable exits) of its
+    /// room (<see cref="UsableExits"/>) into the neighbouring room. It arrives from the pipe leading back, the entrance
+    /// node ShortcutHandler.Update picks for a room exit (ShortcutHandler.cs:201). Returns false (caller reports ERROR)
+    /// when <see cref="MovablePlayer0"/> rejects or the room has no usable exit.
+    /// </summary>
+    public bool HopRoom(RainWorld rw, int exit)
+    {
+        Player player = MovablePlayer0(rw, "HOP_ROOM");
+        return player != null && HopThroughExit(player, exit, "HOP_ROOM");
+    }
+
+    private bool HopThroughExit(Player player, int exit, string command)
+    {
+        World world = player.room.game.world;
+        AbstractRoom room = player.room.abstractRoom;
+        List<int> exits = UsableExits(world, room);
+        if (exits.Count == 0)
+        {
+            log?.LogWarning($"[GameFlow] {command}: room {room.name} has no usable exit");
+            return false;
+        }
+
+        int node = exits[exit % exits.Count];
+        AbstractRoom dest = world.GetAbstractRoom(room.connections[node]);
+        log?.LogInfo($"[GameFlow] {command}: player 0 {room.name} -> {dest.name} (exit node {node}, {exits.Count} usable)");
+        SendThroughShortcut(player, dest, dest.ExitIndex(room.index));
+        return true;
+    }
+
+    /// <summary>
+    /// Debug SWITCH_REGION command: takes player 0 through a region gate of its region (usable gate
+    /// <paramref name="gate"/> % count, in world-file order) into the neighbouring region. The slugcat is sent into the
+    /// gate room through its pipe on this region's side and holds still (Player.NullController) until it has left that
+    /// room; <see cref="UpdateRegionSwitch"/> does the rest. Usable gates lead to a region the overworld knows and are not
+    /// mid-cycle. Returns false (caller reports ERROR) when <see cref="MovablePlayer0"/> rejects or no gate is usable.
+    /// </summary>
+    public bool SwitchRegion(RainWorld rw, int gate)
+    {
+        Player player = MovablePlayer0(rw, "SWITCH_REGION");
+        if (player == null)
+            return false;
+
+        RainWorldGame game = player.room.game;
+        var gates = new List<AbstractRoom>();
+        foreach (AbstractRoom room in game.world.abstractRooms)
+        {
+            RegionGate realized = room.realizedRoom?.regionGate;
+            if (room.gate && UsableExits(game.world, room).Count > 0 && GateDestination(game, room) != null &&
+                (realized == null || realized.mode == RegionGate.Mode.MiddleClosed))
+                gates.Add(room);
+        }
+        if (gates.Count == 0)
+        {
+            log?.LogWarning($"[GameFlow] SWITCH_REGION rejected: region {game.world.name} has no usable gate");
+            return false;
+        }
+
+        AbstractRoom gateRoom = gates[gate % gates.Count];
+        log?.LogInfo($"[GameFlow] SWITCH_REGION: player 0 {player.room.abstractRoom.name} -> {gateRoom.name} -> region {GateDestination(game, gateRoom)}");
+        SendThroughShortcut(player, gateRoom, UsableExits(game.world, gateRoom)[0]);
+        player.controller = new Player.NullController();
+        switchState = SwitchState.WaitForGateRoom;
+        switchGame = game;
+        switchGateRoom = gateRoom;
+        return true;
+    }
+
+    /// <summary>
+    /// Advances a SWITCH_REGION. Once player 0 is out of the pipe in the gate room, does what RegionGate.Update does when a
+    /// player has stood still in the gate's zone with enough karma and energy (RegionGate.cs:317-323): close the airlock
+    /// behind the player and call OverWorld.GateRequestsSwitchInitiation, which loads the next region's world. When it has
+    /// loaded, OverWorld.WorldLoaded (OverWorld.cs:488-576) has moved the gate room and everything in it into the new world
+    /// and called RegionGate.NewWorldLoaded; the slugcat then leaves through the gate room's far exit, the only one
+    /// connected in the new world. Holding the slugcat still until then keeps it in the gate room while the world loads
+    /// (it would otherwise leave through the pipe it came from: the airlock only closes it in once it is inside, and
+    /// WorldLoaded needs the room realized) and away from the old side's pipe, DISCONNECTED in the new world.
+    /// </summary>
+    private void UpdateRegionSwitch(ProcessManager pm)
+    {
+        if (switchState == SwitchState.None)
+            return;
+
+        RainWorldGame game = pm.currentMainLoop as RainWorldGame;
+        Player player = GetPlayer0(pm)?.realizedCreature as Player;
+        if (!ReferenceEquals(game, switchGame))
+        {
+            EndRegionSwitch(null, "the game was restarted");
+            return;
+        }
+        if (player == null || player.dead)
+        {
+            EndRegionSwitch(player, "player 0 died");
+            return;
+        }
+        if (player.room == null)
+            return; // still in the pipe
+
+        if (switchState == SwitchState.WaitForGateRoom)
+        {
+            RegionGate gate = player.room.regionGate;
+            if (player.room.abstractRoom != switchGateRoom || gate == null || gate.mode != RegionGate.Mode.MiddleClosed)
+            {
+                EndRegionSwitch(player, $"player 0 arrived in {player.room.abstractRoom.name}, not at a closed gate in {switchGateRoom.name}");
+                return;
+            }
+            gate.letThroughDir = player.abstractCreature.pos.x < player.room.TileWidth / 2;
+            gate.mode = RegionGate.Mode.ClosingAirLock;
+            gate.goalDoorPositions[gate.letThroughDir ? 0 : 2] = 1f;
+            game.overWorld.GateRequestsSwitchInitiation(gate);
+            gate.waitingForWorldLoader = true;
+            switchGate = gate;
+            switchState = SwitchState.WaitForWorld;
+            return;
+        }
+
+        if (switchGate.waitingForWorldLoader)
+            return;
+        if (player.room.regionGate != switchGate)
+        {
+            EndRegionSwitch(player, $"player 0 left the gate room for {player.room.abstractRoom.name}");
+            return;
+        }
+        EndRegionSwitch(player, null);
+        HopThroughExit(player, 0, "SWITCH_REGION");
+    }
+
+    private void EndRegionSwitch(Player player, string failure)
+    {
+        if (failure != null)
+            log?.LogWarning($"[GameFlow] SWITCH_REGION abandoned: {failure}");
+        if (player?.controller is Player.NullController)
+            player.controller = null;
+        switchState = SwitchState.None;
+        switchGame = null;
+        switchGateRoom = null;
+        switchGate = null;
+    }
+
+    /// <summary>
+    /// Player 0 when a debug command may send it to another room: RL mode fully on, no RESET, a story game current,
+    /// player 0 alive in a room and not already on its way out (into a pipe, through a SWITCH_REGION, or through a gate
+    /// whose next region is loading). Otherwise logs why and returns null.
+    /// </summary>
+    private Player MovablePlayer0(RainWorld rw, string command)
+    {
+        ProcessManager pm = rw?.processManager;
+        if (state != FlowState.On || resetState != ResetState.None || !IsInStoryGame(pm))
+        {
+            log?.LogWarning($"[GameFlow] {command} rejected: RL mode not fully on, a RESET is in progress or no story game is current");
+            return null;
+        }
+
+        RainWorldGame game = (RainWorldGame)pm.currentMainLoop;
+        Player player = GetPlayer0(pm)?.realizedCreature as Player;
+        if (player == null || player.dead || game.GameOverModeActive)
+        {
+            log?.LogWarning($"[GameFlow] {command} rejected: player 0 is not alive");
+            return null;
+        }
+        if (player.room == null || player.enteringShortCut.HasValue || switchState != SwitchState.None ||
+            (player.room.regionGate != null && player.room.regionGate.waitingForWorldLoader))
+        {
+            log?.LogWarning($"[GameFlow] {command} rejected: player 0 is on its way between rooms (in or entering a pipe, " +
+                            "or a region switch is under way)");
+            return null;
+        }
+        return player;
+    }
+
+    /// <summary>
+    /// Takes player 0 out of its room into <paramref name="dest"/>, to come out of the pipe at node
+    /// <paramref name="entranceNode"/>: it leaves with everything it holds like Creature.SuckedIntoShortCut
+    /// (Creature.cs:1050-1063) and waits between rooms like after a room exit (ShortcutHandler.cs:198-203), so the game
+    /// loads the room, moves the camera and spits it out there.
+    /// </summary>
+    private static void SendThroughShortcut(Player player, AbstractRoom dest, int entranceNode)
+    {
+        // A room script's controller stays with the room being left (e.g. the NullController of the fresh-save
+        // intro, RoomSpecificScript.cs:102, which would otherwise keep the agent's input away for good).
+        player.controller = null;
+        Room room = player.room;
+        var vessel = new ShortcutHandler.ShortCutVessel(new RWCustom.IntVector2(0, 0), player, dest, 0) { entranceNode = entranceNode };
+        foreach (AbstractPhysicalObject obj in player.abstractCreature.GetAllConnectedObjects())
+        {
+            if (obj.realizedObject == null)
+                continue;
+            if (obj.realizedObject is Creature creature)
+            {
+                creature.inShortcut = true;
+                creature.inShortcutVessel = vessel;
+            }
+            room.RemoveObject(obj.realizedObject);
+        }
+        room.game.shortcuts.betweenRoomsWaitingLobby.Add(vessel);
+    }
+
+    /// <summary>
+    /// Exit nodes of <paramref name="room"/> that lead into a room of <paramref name="world"/> with a pipe back. Exits
+    /// that lead nowhere (DISCONNECTED in the world file, e.g. a gate room's far side) are left out.
+    /// </summary>
+    private static List<int> UsableExits(World world, AbstractRoom room)
+    {
+        var exits = new List<int>();
+        for (int i = 0; i < room.connections.Length; i++)
+        {
+            AbstractRoom dest = room.connections[i] > -1 ? world.GetAbstractRoom(room.connections[i]) : null;
+            if (dest != null && dest.ExitIndex(room.index) > -1)
+                exits.Add(i);
+        }
+        return exits;
+    }
+
+    /// <summary>
+    /// The region <paramref name="gateRoom"/> leads to from the current world, worked out like
+    /// OverWorld.GateRequestsSwitchInitiation (OverWorld.cs:328-343), or null if that is no region the overworld knows
+    /// (the switch would then never load anything).
+    /// </summary>
+    private static string GateDestination(RainWorldGame game, AbstractRoom gateRoom)
+    {
+        string current = Region.GetVanillaEquivalentRegionAcronym(game.world.name);
+        string[] parts = gateRoom.name.Split('_');
+        if (parts.Length != 3)
+            return null;
+        string other = parts[1] != current ? parts[1] : parts[2];
+        if (other == current)
+            return null;
+        other = Region.GetProperRegionAcronym(game.TimelinePoint, other);
+        return game.overWorld.GetRegion(other) != null ? other : null;
+    }
+
     /// <summary>True when a story RainWorldGame is current and no process switch is pending.</summary>
     public static bool IsInStoryGame(ProcessManager pm)
     {
@@ -478,6 +766,7 @@ public class GameFlowController
                     {
                         UpdateAutoNavigate(rw, pm);
                         UpdateGameOverAdvance(pm);
+                        UpdateRegionSwitch(pm);
                     }
                     break;
 

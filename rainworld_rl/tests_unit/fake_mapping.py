@@ -12,7 +12,9 @@ header read:
 * ``service_commands`` - when ``command == RESET``, "wipe" and ack with
   ``command_result = OK``, ``command = NONE``, and raise ``READY``; when
   ``command == KILL_PLAYER``, arm ``next_step_dead`` (the next serviced step
-  reports the ``PLAYER_DEAD`` edge) and ack ``OK``.
+  reports the ``PLAYER_DEAD`` edge) and ack ``OK``; ``HOP_ROOM`` and
+  ``SWITCH_REGION`` are acked ``OK`` while ``READY`` (``command_args``
+  records each command's ``command_arg``).
 
 Everything happens synchronously inside ``__getitem__`` so tests are
 deterministic; a few tests use a thread for the time-based behaviour.
@@ -27,8 +29,10 @@ from rainworld_rl import shared_memory as sm
 
 
 class FakeMapping(bytearray):
-    def __init__(self, size: int = sm.TOTAL_SIZE, alive: bool = True, auto_ready: bool = True):
+    def __init__(self, size: int = sm.TOTAL_SIZE, alive: bool = True, auto_ready: bool = True,
+                 protocol_version: int = sm.PROTOCOL_VERSION):
         super().__init__(size)
+        self.put(sm.OFFSET_PROTOCOL_VERSION, bytes((protocol_version,)))  # like the mod: as soon as the mapping exists
         self.alive = alive
         # Like the real mod: once Python sets CONNECTED, enter RL mode and
         # raise IN_GAME + READY on the next tick.
@@ -39,6 +43,7 @@ class FakeMapping(bytearray):
         self.closed = False
         self.steps_serviced: List[tuple] = []   # (action_bits, ticks)
         self.commands_received: List[int] = []
+        self.command_args: List[int] = []
         self.fill_value = 7                      # byte written into the frame
         self.mod_fields = dict(
             karma = 3, karma_cap = 5, food = 2, player_x = 123.5, player_y = -4.25,
@@ -107,6 +112,7 @@ class FakeMapping(bytearray):
     def service_command(self) -> None:
         h = self.header()
         self.commands_received.append(h.command)
+        self.command_args.append(self.raw(sm.OFFSET_COMMAND_ARG, 1)[0])
         if h.command == sm.COMMAND_RESET and not self.fail_commands:
             self.mod_fields["cycle_number"] = 0
             self.set_mod_bit(sm.STATUS_READY, True)
@@ -116,6 +122,8 @@ class FakeMapping(bytearray):
             # Like the mod: the kill is applied immediately; the death EDGE shows
             # up on the next step and the ack never waits for the respawn.
             self.next_step_dead = True
+            result = sm.COMMAND_RESULT_OK
+        elif h.command in (sm.COMMAND_HOP_ROOM, sm.COMMAND_SWITCH_REGION) and not self.fail_commands and h.ready:
             result = sm.COMMAND_RESULT_OK
         else:
             result = sm.COMMAND_RESULT_ERROR

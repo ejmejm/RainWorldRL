@@ -32,6 +32,7 @@ def test_header_struct_matches_protocol_offsets():
     state = ModState(
         sync_flag = 2, ticks_per_step = 4, status = 0x3F,
         frame_width = 160, frame_height = 90, command = 1, command_result = 2, game_flags = 0x0B,
+        protocol_version = 4,
         heartbeat = 0xDEADBEEF, step_counter = 77, karma = 3, karma_cap = 5, food = 9, food_max = 11,
         player_x = 1.5, player_y = -2.5, room_index = -1, cycle_number = 12,
         action_bits = 0x1A5, cycle_progress = 0.5,
@@ -42,7 +43,7 @@ def test_header_struct_matches_protocol_offsets():
     assert buf[0] == 2 and buf[1] == 0 and buf[2] == 4 and buf[3] == 0x3F   # offset 1 reserved
     assert struct.unpack_from("<I", buf, 4)[0] == 160
     assert struct.unpack_from("<I", buf, 8)[0] == 90
-    assert buf[12] == 1 and buf[13] == 2 and buf[14] == 0x0B and buf[15] == 0
+    assert buf[12] == 1 and buf[13] == 2 and buf[14] == 0x0B and buf[15] == 4
     assert struct.unpack_from("<I", buf, 16)[0] == 0xDEADBEEF
     assert struct.unpack_from("<I", buf, 20)[0] == 77
     assert buf[24:28] == bytes((3, 5, 9, 11))
@@ -247,6 +248,18 @@ def test_connect_without_waiting_for_ready():
     assert client.is_connected() and not mapping.header().ready
 
 
+@pytest.mark.parametrize("version", [0, 3])
+def test_connect_rejects_protocol_version_mismatch(version):
+    mapping = FakeMapping(protocol_version = version)
+    client = make_client(mapping)
+    with pytest.raises(sm.ProtocolVersionError, match = f"speaks protocol version {version}") as excinfo:
+        client.connect(liveness_timeout = 0.1)
+    assert f"expects version {sm.PROTOCOL_VERSION}" in str(excinfo.value)
+    assert ("before versioning" in str(excinfo.value)) == (version == 0)
+    assert mapping.closed and not client.is_connected()
+    assert not mapping.header().connected   # an incompatible mod never enters RL mode
+
+
 # ---------------------------------------------------------------------------
 # Step handshake
 # ---------------------------------------------------------------------------
@@ -433,6 +446,26 @@ def test_kill_player_timeout_raises():
         client.kill_player(timeout = 0.05)
 
 
+@pytest.mark.parametrize("method, command", [("hop_room", sm.COMMAND_HOP_ROOM),
+                                             ("switch_region", sm.COMMAND_SWITCH_REGION)])
+def test_room_and_region_moves_send_their_arg_and_ack_without_stepping(method, command):
+    mapping = FakeMapping()
+    client = make_client(mapping)
+    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+
+    state = getattr(client, method)(3, timeout = 1.0)
+    getattr(client, method)(0, timeout = 1.0)
+
+    assert mapping.commands_received == [command, command]
+    assert mapping.command_args == [3, 0]          # the exit / gate choice travels in command_arg
+    assert state.command == sm.COMMAND_NONE and state.command_result == sm.COMMAND_RESULT_OK
+    assert mapping.steps_serviced == []            # the ack does not step the game
+
+    mapping.fail_commands = True
+    with pytest.raises(sm.CommandError, match = "error"):
+        getattr(client, method)(1, timeout = 1.0)
+
+
 def test_operations_require_connection():
     client = make_client(FakeMapping())
     with pytest.raises(sm.NotConnectedError):
@@ -576,6 +609,26 @@ def test_env_debug_kill_requires_connection_and_propagates_command_error():
     mapping.fail_commands = True
     with pytest.raises(sm.CommandError):
         env.debug_kill(timeout = 0.2)
+
+
+def test_env_debug_hop_room_and_switch_region_send_commands():
+    env = make_env(FakeMapping())
+    with pytest.raises(sm.GameNotRunningError):
+        env.debug_hop_room(1)
+    with pytest.raises(sm.GameNotRunningError):
+        env.debug_switch_region()
+
+    mapping = FakeMapping()
+    env = make_env(mapping)
+    env.reset()
+    env.debug_hop_room(7)
+    env.debug_switch_region(2)
+    assert mapping.commands_received == [sm.COMMAND_RESET, sm.COMMAND_HOP_ROOM, sm.COMMAND_SWITCH_REGION]
+    assert mapping.command_args[1:] == [7, 2]
+
+    mapping.fail_commands = True
+    with pytest.raises(sm.CommandError):
+        env.debug_hop_room(0, timeout = 0.2)
 
 
 def test_env_step_before_connect_raises():

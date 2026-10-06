@@ -1,7 +1,7 @@
 """
 Shared memory client for communicating with the Rain World RL mod.
 
-Implements protocol v3 as described in ``docs/PROTOCOL.md``. The mapping is a
+Implements protocol v4 as described in ``docs/PROTOCOL.md``. The mapping is a
 named memory-mapped file (``RainWorldRL``) consisting of a 64-byte header
 followed by an RGB24 frame of up to 1920x1080.
 
@@ -14,10 +14,10 @@ Header layout (all little-endian)::
     3      1    both    status          see STATUS_* bits
     4      4    py->mod frame_width     uint32
     8      4    py->mod frame_height    uint32
-    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER (debug)
+    12     1    py->mod command         0 NONE, 1 RESET, 2 KILL_PLAYER, 3 ENTER_SHELTER, 4 HOP_ROOM, 5 SWITCH_REGION (2-5: debug)
     13     1    mod->py command_result  0 none/in-progress, 1 OK, 2 ERROR
     14     1    mod->py game_flags      see GAME_FLAG_* bits
-    15     1    -       reserved
+    15     1    mod->py protocol_version PROTOCOL_VERSION, written as soon as the mapping exists (0 = pre-versioning build)
     16     4    mod->py heartbeat       uint32, bumped every Unity Update
     20     4    mod->py step_counter    uint32, bumped once per completed step
     24     1    mod->py karma           uint8
@@ -33,7 +33,8 @@ Header layout (all little-endian)::
     52     1    mod->py food_to_hibernate uint8, pips needed to sleep this cycle (== food_max while malnourished)
     53     1    mod->py malnourished    uint8 0/1, the previous sleep was a starving one
     54     4    mod->py region          ASCII region acronym (World.region.name, e.g. "SU"), NUL-padded; all NUL if unavailable
-    58     6    -       reserved
+    58     1    py->mod command_arg     argument of the command (ENTER_SHELTER: food pips; HOP_ROOM: exit; SWITCH_REGION: gate)
+    59     5    -       reserved
     64     N    mod->py frame           RGB24, row-major, top row first
 
 Actions are *raw key presses*: ``action_bits`` has one bit per key a player
@@ -55,7 +56,9 @@ from __future__ import annotations
 
 import logging
 import mmap
+import os
 import struct
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -71,6 +74,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SHARED_MEMORY_NAME = "RainWorldRL"
+# Bump whenever the header layout or the meaning of a field/command changes (with SharedMemoryBridge.cs).
+PROTOCOL_VERSION = 4
 HEADER_SIZE = 64
 MAX_FRAME_WIDTH = 1920
 MAX_FRAME_HEIGHT = 1080
@@ -93,6 +98,7 @@ OFFSET_HEIGHT = 8
 OFFSET_COMMAND = 12
 OFFSET_COMMAND_RESULT = 13
 OFFSET_GAME_FLAGS = 14
+OFFSET_PROTOCOL_VERSION = 15
 OFFSET_HEARTBEAT = 16
 OFFSET_STEP_COUNTER = 20
 OFFSET_KARMA = 24
@@ -108,6 +114,7 @@ OFFSET_CYCLE_PROGRESS = 48    # mod->py float32
 OFFSET_FOOD_TO_HIBERNATE = 52 # mod->py uint8
 OFFSET_MALNOURISHED = 53      # mod->py uint8 (0/1)
 OFFSET_REGION = 54            # mod->py 4 bytes ASCII, NUL-padded (region acronym, "" if unavailable)
+OFFSET_COMMAND_ARG = 58       # py->mod, written by send_command
 REGION_SIZE = 4
 OFFSET_FRAME_DATA = HEADER_SIZE
 
@@ -150,6 +157,9 @@ MOD_OWNED_STATUS_MASK = 0xFF & ~PY_OWNED_STATUS_MASK
 COMMAND_NONE = 0
 COMMAND_RESET = 1
 COMMAND_KILL_PLAYER = 2       # debug: kill player 0 (death edge + respawn flow)
+COMMAND_ENTER_SHELTER = 3     # debug: send player 0 into its den shelter with command_arg food pips (sleep flow)
+COMMAND_HOP_ROOM = 4          # debug: send player 0 through exit command_arg (mod: % usable exits) into the next room
+COMMAND_SWITCH_REGION = 5     # debug: take player 0 through gate command_arg (mod: % usable gates) into the next region
 
 # Command results
 COMMAND_RESULT_PENDING = 0
@@ -175,7 +185,7 @@ HEADER_STRUCT = struct.Struct(
     "B"    # command
     "B"    # command_result
     "B"    # game_flags
-    "x"    # reserved
+    "B"    # protocol_version
     "I"    # heartbeat
     "I"    # step_counter
     "B"    # karma
@@ -191,7 +201,7 @@ HEADER_STRUCT = struct.Struct(
     "B"    # food_to_hibernate
     "B"    # malnourished
     "4s"   # region (ASCII, NUL-padded)
-    "6x"   # reserved
+    "6x"   # command_arg (py->mod, written on its own by send_command) + reserved
 )
 assert HEADER_STRUCT.size == HEADER_SIZE, HEADER_STRUCT.size
 
@@ -237,6 +247,10 @@ class CommandError(SharedMemoryError):
     """The mod reported an error, or timed out, while executing a command."""
 
 
+class ProtocolVersionError(SharedMemoryError):
+    """The running mod speaks a different protocol version than this package (stale mod DLL)."""
+
+
 # ---------------------------------------------------------------------------
 # Header dataclass
 # ---------------------------------------------------------------------------
@@ -258,6 +272,7 @@ class ModState:
     command: int = COMMAND_NONE
     command_result: int = COMMAND_RESULT_PENDING
     game_flags: int = 0
+    protocol_version: int = 0  # PROTOCOL_VERSION of the mod; 0 = a mod build from before versioning
     heartbeat: int = 0
     step_counter: int = 0
     karma: int = 0
@@ -333,6 +348,7 @@ class ModState:
             self.command & 0xFF,
             self.command_result & 0xFF,
             self.game_flags & 0xFF,
+            self.protocol_version & 0xFF,
             self.heartbeat & 0xFFFFFFFF,
             self.step_counter & 0xFFFFFFFF,
             self.karma & 0xFF,
@@ -469,6 +485,35 @@ def open_mapping(name: str = SHARED_MEMORY_NAME, size: int = TOTAL_SIZE) -> mmap
     return mmap.mmap(-1, size, tagname = name)
 
 
+def default_shm_path(instance: int = 0) -> Optional[str]:
+    """
+    The /dev/shm file backing ``instance``'s mapping on Linux, or None on
+    Windows (named mapping, one instance). The uid and SLURM job id keep users
+    and jobs that share a node apart.
+    """
+    if sys.platform == "win32":
+        if instance != 0:
+            raise ValueError("Multiple game instances are only supported on Linux")
+        return None
+    job = os.environ.get("SLURM_JOB_ID")
+    tag = f"{os.getuid()}_{job}" if job else str(os.getuid())
+    return f"/dev/shm/rainworld_rl_{tag}_{instance}"
+
+
+def open_file_mapping(path: str, size: int = TOTAL_SIZE) -> mmap.mmap:
+    """
+    Open (or create) a file-backed mapping, the counterpart of the mod's
+    ``RAINWORLD_RL_SHM`` mode. Under Wine the game maps the same /dev/shm file.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.fstat(fd).st_size < size:
+            os.ftruncate(fd, size)
+        return mmap.mmap(fd, size)
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -500,6 +545,7 @@ class SharedMemoryClient:
         frame_height: int = 90,
         debug_timing: bool = False,
         mapping_factory: Optional[Callable[[], Any]] = None,
+        shm_path: Optional[str] = None,
     ):
         """
         Args:
@@ -509,7 +555,11 @@ class SharedMemoryClient:
             mapping_factory: Callable returning a mapping object (see module
                 docstring). Defaults to opening the real named mapping. Used
                 by unit tests to inject an in-memory fake.
+            shm_path: Use the file-backed mapping at this path instead of the
+                named mapping (Linux / Wine; see ``open_file_mapping``).
         """
+        if mapping_factory is None and shm_path is not None:
+            mapping_factory = lambda: open_file_mapping(shm_path)
         self._validate_dims(frame_width, frame_height)
         self.frame_width = frame_width
         self.frame_height = frame_height
@@ -631,7 +681,8 @@ class SharedMemoryClient:
         Attach to a running game.
 
         1. Open the mapping and confirm the mod is alive (heartbeat advances;
-           see ``wait_for_alive`` for the ``MOD_ALIVE`` stall grace).
+           see ``wait_for_alive`` for the ``MOD_ALIVE`` stall grace) and
+           speaks ``PROTOCOL_VERSION``.
         2. Write the requested frame dimensions and raise ``CONNECTED``.
         3. Optionally wait for ``READY``.
 
@@ -640,6 +691,8 @@ class SharedMemoryClient:
         Raises:
             GameNotRunningError: no live mod behind the mapping. The mapping is
                 closed again before raising.
+            ProtocolVersionError: the mod is from another version of the library
+                (stale DLL). The mapping is closed again before raising.
             ReadyTimeoutError: ``wait_ready`` was set and READY never rose.
         """
         try:
@@ -647,6 +700,16 @@ class SharedMemoryClient:
         except GameNotRunningError:
             self._close()
             raise
+        if state.protocol_version != PROTOCOL_VERSION:
+            self._close()
+            found = state.protocol_version
+            raise ProtocolVersionError(
+                f"The RainWorldRL mod in the running game speaks protocol version "
+                f"{'0 (a mod build from before versioning)' if found == 0 else found}, but this rainworld_rl "
+                f"package expects version {PROTOCOL_VERSION}: the deployed mod DLL is from another version "
+                "of the library. env.launch() redeploys the packaged mod and restarts the game, "
+                "or `rainworld-rl setup` installs it."
+            )
 
         self._write_frame_dimensions()
         self.set_connected(True)
@@ -872,12 +935,12 @@ class SharedMemoryClient:
 
     # -- commands ----------------------------------------------------------
 
-    def send_command(self, command: int, timeout: float = 60.0) -> int:
+    def send_command(self, command: int, timeout: float = 60.0, arg: int = 0) -> int:
         """
         Issue a command and block until the mod acknowledges it.
 
-        Clears ``command_result``, writes ``command``, then polls
-        ``command_result`` until it is non-zero.
+        Clears ``command_result``, writes ``arg`` (``command_arg``) and
+        ``command``, then polls ``command_result`` until it is non-zero.
 
         Returns:
             The result code (``COMMAND_RESULT_OK``).
@@ -888,6 +951,7 @@ class SharedMemoryClient:
         """
         self._require_connected()
         self._write_byte(OFFSET_COMMAND_RESULT, COMMAND_RESULT_PENDING)
+        self._write_byte(OFFSET_COMMAND_ARG, arg)
         self._write_byte(OFFSET_COMMAND, command)
 
         deadline = time.monotonic() + timeout
@@ -932,6 +996,72 @@ class SharedMemoryClient:
         """
         self._require_connected()
         self.send_command(COMMAND_KILL_PLAYER, timeout = timeout)
+        return self.read_state()
+
+    def enter_shelter(self, food: int, timeout: float = 10.0) -> ModState:
+        """
+        Send ``ENTER_SHELTER`` - a **debug/testing** command: set player 0's
+        food to ``food`` pips (clamped to its maximum) and send it into its den
+        shelter (the shelter it last woke up in, or the slugcat's default one)
+        through the shelter's entrance pipe, as if it had walked in.
+
+        The mod acks at once; the arrival and any sleep are observed through
+        later steps. With ``food_to_hibernate`` pips the game hibernates the
+        slugcat once it stands still away from the entrance (fed sleep); with
+        fewer it sleeps starving if DOWN is held for 260 ticks there.
+
+        Raises:
+            CommandError: the mod reported ERROR (RL mode not fully on, no live
+                player 0, den shelter not in the current region) or did not ack
+                within ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_ENTER_SHELTER, timeout = timeout, arg = food)
+        return self.read_state()
+
+    def hop_room(self, exit: int, timeout: float = 10.0) -> ModState:
+        """
+        Send ``HOP_ROOM`` - a **debug/testing** command: send player 0 out
+        through one of its room's exits into the neighbouring room, as if it
+        had walked into that pipe. ``exit`` (0-255) picks the exit:
+        ``exit % n`` of the room's ``n`` usable exits (exits that lead
+        nowhere are skipped), so a seeded RNG gives reproducible routes.
+
+        The mod acks once the slugcat is in the pipe; ``ready`` stays up.
+        ``room_index`` changes once the next room has loaded and the slugcat
+        is in its pipe (usually within a few steps), and it comes out of the
+        pipe a few steps later.
+
+        Raises:
+            CommandError: the mod reported ERROR (RL mode not fully on, no live
+                player 0 in a room, already on its way out of the room or
+                through a region switch, no usable exit) or did not ack within
+                ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_HOP_ROOM, timeout = timeout, arg = exit)
+        return self.read_state()
+
+    def switch_region(self, gate: int = 0, timeout: float = 10.0) -> ModState:
+        """
+        Send ``SWITCH_REGION`` - a **debug/testing** command: take player 0
+        through a region gate of its region into the neighbouring region with
+        the game's own gate logic (karma requirement skipped). ``gate``
+        (0-255) picks the gate: ``gate % n`` of the region's ``n`` usable
+        gates.
+
+        The mod acks once the slugcat is on its way to the gate room. It then
+        holds still (input is ignored) while the gate starts and the next
+        region loads; ``region`` changes when the world has loaded, and the
+        slugcat then leaves the gate room into the new region, after which it
+        takes input again. Other debug moves are rejected until then.
+
+        Raises:
+            CommandError: the mod reported ERROR (as for ``hop_room``, or the
+                region has no usable gate) or did not ack within ``timeout``.
+        """
+        self._require_connected()
+        self.send_command(COMMAND_SWITCH_REGION, timeout = timeout, arg = gate)
         return self.read_state()
 
     # -- misc --------------------------------------------------------------

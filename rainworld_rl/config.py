@@ -7,10 +7,12 @@ Resolution order for ``load_config()``:
 2. The file named by the ``RAINWORLD_RL_CONFIG`` environment variable.
 3. ``rainworld_rl.toml`` at the repository root (git-ignored; copy
    ``rainworld_rl.example.toml`` to create it).
-4. Built-in defaults.
+4. ``~/.config/rainworld_rl/rainworld_rl.toml``.
+5. Built-in defaults.
 
-Only ``game_dir``, ``rl_save_dir`` and ``launch_timeout`` are read from the
-file; everything else is derived from ``game_dir``. ``rl_save_dir`` is
+Read from the file: ``game_dir``, ``rl_save_dir``, ``launch_timeout`` and, on
+Linux, ``container``, ``wine_prefix_dir`` and ``renderer``; everything else is
+derived from ``game_dir``. ``rl_save_dir`` is
 informational: the mod decides where the RL save lives, this value only tells
 Python where to look (e.g. for debugging).
 """
@@ -18,6 +20,7 @@ Python where to look (e.g. for debugging).
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,9 +32,20 @@ PathLike = Union[str, os.PathLike]
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_FILENAME = "rainworld_rl.toml"
 CONFIG_ENV_VAR = "RAINWORLD_RL_CONFIG"
+USER_CONFIG_PATH = Path.home() / ".config" / "rainworld_rl" / CONFIG_FILENAME
 
-DEFAULT_GAME_DIR = Path("Z:/SteamLibrary/steamapps/common/Rain World")
+# Linux: the game, Wine prefixes and container image live here by default.
+LINUX_DATA_DIR = Path.home() / ".local" / "share" / "rainworld_rl"
+
+if sys.platform == "win32":
+    DEFAULT_GAME_DIR = Path("Z:/SteamLibrary/steamapps/common/Rain World")
+else:
+    DEFAULT_GAME_DIR = LINUX_DATA_DIR / "game"
+DEFAULT_WINE_PREFIX_DIR = LINUX_DATA_DIR / "wine"
 DEFAULT_LAUNCH_TIMEOUT = 120.0
+
+# Linux: how the game is rendered (see launcher.resolve_renderer / launcher._renderer).
+RENDERERS = ("auto", "cpu", "wsl", "virtualgl")
 
 GAME_EXE_NAME = "RainWorld.exe"
 PLUGIN_DLL_NAME = "RainWorldRL.dll"
@@ -51,12 +65,23 @@ class Config:
         launch_timeout: Seconds ``launch()`` waits for the mod's heartbeat after
             starting the game.
         rl_save_dir: Where the mod keeps the RL save (informational).
+        container: Linux only: Apptainer image (.sif) that provides Wine and
+            Xvfb. None runs ``wine`` / ``Xvfb`` from the host's PATH.
+        wine_prefix_dir: Linux only: holds one Wine prefix per game instance
+            (hard-linked copies of a base prefix, created on first launch).
+        renderer: Linux only: ``"auto"`` (default: ``virtualgl`` when an NVIDIA
+            GPU is visible, else ``wsl`` on WSL2, else ``cpu``), ``"cpu"`` (DXVK on
+            Mesa lavapipe), ``"wsl"`` (WSL2's GPU via Mesa d3d12) or ``"virtualgl"``
+            (a GPU's EGL device via VirtualGL).
         source: The config file the values came from, or None for defaults.
     """
 
     game_dir: Path = DEFAULT_GAME_DIR
     launch_timeout: float = DEFAULT_LAUNCH_TIMEOUT
     rl_save_dir: Optional[Path] = None
+    container: Optional[Path] = None
+    wine_prefix_dir: Path = DEFAULT_WINE_PREFIX_DIR
+    renderer: str = "auto"
     source: Optional[Path] = field(default = None, compare = False)
 
     def __post_init__(self) -> None:
@@ -68,6 +93,11 @@ class Config:
             object.__setattr__(self, "rl_save_dir", self.plugins_dir / "RainWorldRL" / "saves")
         else:
             object.__setattr__(self, "rl_save_dir", Path(self.rl_save_dir))
+        if self.container is not None:
+            object.__setattr__(self, "container", Path(self.container))
+        object.__setattr__(self, "wine_prefix_dir", Path(self.wine_prefix_dir))
+        if self.renderer not in RENDERERS:
+            raise ConfigError(f"renderer must be one of {RENDERERS}, got {self.renderer!r}")
         if self.source is not None:
             object.__setattr__(self, "source", Path(self.source))
 
@@ -118,14 +148,14 @@ def find_config_path(path: Optional[PathLike] = None) -> Optional[Path]:
             raise ConfigError(f"{CONFIG_ENV_VAR} points to a missing file: {p}")
         return p
 
-    repo_cfg = REPO_ROOT / CONFIG_FILENAME
-    if repo_cfg.is_file():
-        return repo_cfg
+    for p in (REPO_ROOT / CONFIG_FILENAME, USER_CONFIG_PATH):
+        if p.is_file():
+            return p
     return None
 
 
 def _config_from_dict(data: Dict[str, Any], source: Optional[Path]) -> Config:
-    known = {"game_dir", "launch_timeout", "rl_save_dir"}
+    known = {"game_dir", "launch_timeout", "rl_save_dir", "container", "wine_prefix_dir", "renderer"}
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"Unknown config keys in {source}: {sorted(unknown)}")
@@ -134,15 +164,20 @@ def _config_from_dict(data: Dict[str, Any], source: Optional[Path]) -> Config:
     if "game_dir" in data:
         if not isinstance(data["game_dir"], str):
             raise ConfigError("game_dir must be a string")
-        kwargs["game_dir"] = Path(data["game_dir"])
+        kwargs["game_dir"] = Path(data["game_dir"]).expanduser()
     if "launch_timeout" in data:
         if isinstance(data["launch_timeout"], bool) or not isinstance(data["launch_timeout"], (int, float)):
             raise ConfigError("launch_timeout must be a number")
         kwargs["launch_timeout"] = float(data["launch_timeout"])
-    if "rl_save_dir" in data:
-        if not isinstance(data["rl_save_dir"], str):
-            raise ConfigError("rl_save_dir must be a string")
-        kwargs["rl_save_dir"] = Path(data["rl_save_dir"])
+    for key in ("rl_save_dir", "container", "wine_prefix_dir"):
+        if key in data:
+            if not isinstance(data[key], str):
+                raise ConfigError(f"{key} must be a string")
+            kwargs[key] = Path(data[key]).expanduser()
+    if "renderer" in data:
+        if not isinstance(data["renderer"], str):
+            raise ConfigError("renderer must be a string")
+        kwargs["renderer"] = data["renderer"]
     return Config(source = source, **kwargs)
 
 

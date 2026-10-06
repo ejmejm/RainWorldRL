@@ -3,14 +3,22 @@ using UnityEngine;
 
 /// <summary>
 /// Captures game frames at a configurable resolution for RL observation.
-/// Uses Unity's RenderTexture to scale the game camera output.
+/// Reads what the main (Futile) camera rendered this frame from its target texture, scales it on the
+/// GPU and reads back only the small frame (one GPU sync per capture; this matters with software
+/// rendering). Rain World's camera always renders into a texture that a UI image draws to the screen
+/// later in the frame, so the back buffer at capture time still holds the previous rendered frame.
+///
+/// While the agent is in control (<see cref="SetAgentInControl"/>) the camera renders straight into a
+/// texture <see cref="RenderScale"/> x the frame size with the game's field of view, so far fewer
+/// pixels are shaded than at 1366x768.
 /// Uses lazy initialization to avoid creating textures before Unity is ready.
 /// </summary>
 public class FrameCapture : IDisposable
 {
     private RenderTexture renderTexture;
     private Texture2D captureTexture;
-    private Texture2D screenCapture;  // Cached for reading from screen
+    private RenderTexture screenCapture;  // Full-size GPU copy of the back buffer (camera without a target texture)
+    private RenderTexture smallTarget;    // The camera's render target while the agent is in control
     private int width;
     private int height;
     private int lastScreenWidth;
@@ -21,6 +29,10 @@ public class FrameCapture : IDisposable
     public int Width => width;
     public int Height => height;
     public int FrameSize => width * height * 3;
+
+    /// <summary>The camera renders into a texture this many times the frame size while the agent is in
+    /// control; the capture averages it down. 0 keeps the game's own full-size target.</summary>
+    public int RenderScale { get; set; } = 2;
 
     /// <summary>
     /// Initializes the frame capture system with the specified dimensions.
@@ -88,12 +100,59 @@ public class FrameCapture : IDisposable
             renderTexture.Create();
             captureTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
         }
+        // The small target is resized by the next SetAgentInControl, not here: Resize runs inside the
+        // camera's post-render, where the capture still has to read what was just rendered into it.
     }
 
     /// <summary>
-    /// Captures the current frame from what's already rendered on screen.
-    /// Should be called after rendering is complete (e.g., in OnPostRender or after WaitForEndOfFrame).
-    /// Reads from screen and scales to target resolution.
+    /// Called every frame. While the agent is in control the Futile camera renders into the small target;
+    /// otherwise the game's own target is restored. Cheap when nothing changes.
+    /// </summary>
+    public void SetAgentInControl(bool agent)
+    {
+        Camera cam = Futile.instance != null ? Futile.instance.camera : null;
+        if (cam == null)
+            return;
+
+        int targetWidth = width * RenderScale;
+        int targetHeight = height * RenderScale;
+        if (smallTarget != null && (!agent || smallTarget.width != targetWidth || smallTarget.height != targetHeight))
+            ReleaseSmallTarget();  // restores the game's own target
+
+        if (agent && RenderScale > 0)
+        {
+            if (smallTarget == null)
+            {
+                smallTarget = new RenderTexture(targetWidth, targetHeight, 24, RenderTextureFormat.ARGB32);
+                smallTarget.filterMode = FilterMode.Bilinear;
+                smallTarget.Create();
+            }
+            if (cam.targetTexture != smallTarget)
+            {
+                cam.targetTexture = smallTarget;
+                cam.aspect = (float)Futile.screen.pixelWidth / Futile.screen.pixelHeight;  // 1366x768 is not exactly 16:9
+            }
+        }
+    }
+
+    private void ReleaseSmallTarget()
+    {
+        if (smallTarget == null)
+            return;
+        Camera cam = Futile.instance != null ? Futile.instance.camera : null;
+        if (cam != null && cam.targetTexture == smallTarget)
+        {
+            cam.targetTexture = Futile.screen.renderTexture;
+            cam.ResetAspect();
+        }
+        smallTarget.Release();
+        UnityEngine.Object.Destroy(smallTarget);
+        smallTarget = null;
+    }
+
+    /// <summary>
+    /// Captures what the main camera rendered this frame, scaled to the target resolution.
+    /// Call from the main camera's post-render callback.
     /// </summary>
     public byte[] CaptureFrame()
     {
@@ -103,35 +162,16 @@ public class FrameCapture : IDisposable
 
         try
         {
-            int screenWidth = Screen.width;
-            int screenHeight = Screen.height;
+            Camera cam = Camera.main;
+            RenderTexture source = cam != null ? cam.targetTexture : null;
+            if (source != null)
+                Downscale(source, renderTexture);
+            else
+                CaptureBackBuffer();
 
-            // Recreate screen capture texture if screen size changed
-            if (screenCapture == null || screenWidth != lastScreenWidth || screenHeight != lastScreenHeight)
-            {
-                if (screenCapture != null)
-                {
-                    UnityEngine.Object.Destroy(screenCapture);
-                }
-                screenCapture = new Texture2D(screenWidth, screenHeight, TextureFormat.RGB24, false);
-                lastScreenWidth = screenWidth;
-                lastScreenHeight = screenHeight;
-            }
-
-            // IMPORTANT: Set active RT to null to read from the screen back buffer
-            RenderTexture.active = null;
-
-            // Read directly from screen into our cached texture
-            screenCapture.ReadPixels(new Rect(0, 0, screenWidth, screenHeight), 0, 0);
-            screenCapture.Apply();
-
-            // Blit the screen capture to our render texture (this scales it)
-            Graphics.Blit(screenCapture, renderTexture);
-
-            // Read pixels from our scaled render texture
+            // Read pixels from our scaled render texture. No Apply(): GetRawTextureData reads the CPU copy.
             RenderTexture.active = renderTexture;
             captureTexture.ReadPixels(new Rect(0, 0, width, height), 0, 0);
-            captureTexture.Apply();
 
             // Get raw RGB data
             byte[] pixels = captureTexture.GetRawTextureData();
@@ -146,8 +186,67 @@ public class FrameCapture : IDisposable
     }
 
     /// <summary>
+    /// Scales <paramref name="source"/> into <paramref name="dest"/> with bilinear filtering. A source that is a
+    /// power-of-two multiple of the destination is halved step by step, so each output pixel is the exact
+    /// average of its block.
+    /// </summary>
+    private static void Downscale(RenderTexture source, RenderTexture dest)
+    {
+        FilterMode filter = source.filterMode;
+        source.filterMode = FilterMode.Bilinear;  // the game's own target is point-filtered
+        RenderTexture current = source;
+        while (current.width >= 4 * dest.width && current.height >= 4 * dest.height &&
+               current.width % (2 * dest.width) == 0 && current.height % (2 * dest.height) == 0)
+        {
+            RenderTexture half = RenderTexture.GetTemporary(current.width / 2, current.height / 2, 0, RenderTextureFormat.ARGB32);
+            half.filterMode = FilterMode.Bilinear;
+            Graphics.Blit(current, half);
+            if (current != source)
+                RenderTexture.ReleaseTemporary(current);
+            current = half;
+        }
+        Graphics.Blit(current, dest);
+        if (current != source)
+            RenderTexture.ReleaseTemporary(current);
+        source.filterMode = filter;
+    }
+
+    /// <summary>Fallback for a camera that renders to the screen: copy the back buffer on the GPU and scale it.</summary>
+    private void CaptureBackBuffer()
+    {
+        int screenWidth = Screen.width;
+        int screenHeight = Screen.height;
+
+        // Recreate screen capture texture if screen size changed
+        if (screenCapture == null || screenWidth != lastScreenWidth || screenHeight != lastScreenHeight)
+        {
+            if (screenCapture != null)
+            {
+                screenCapture.Release();
+                UnityEngine.Object.Destroy(screenCapture);
+            }
+            screenCapture = new RenderTexture(screenWidth, screenHeight, 0, RenderTextureFormat.ARGB32);
+            screenCapture.Create();
+            lastScreenWidth = screenWidth;
+            lastScreenHeight = screenHeight;
+        }
+
+        // Copy the back buffer on the GPU (no full-size read back)
+        RenderTexture.active = null;
+        ScreenCapture.CaptureScreenshotIntoRenderTexture(screenCapture);
+
+        // Blit the screen capture to our render texture (this scales it). The copy is upside down
+        // where UVs start at the top (D3D, incl. under Wine), so flip it back to Unity's bottom-up rows.
+        if (SystemInfo.graphicsUVStartsAtTop)
+            Graphics.Blit(screenCapture, renderTexture, new Vector2(1f, -1f), new Vector2(0f, 1f));
+        else
+            Graphics.Blit(screenCapture, renderTexture);
+    }
+
+    /// <summary>
     /// Captures frame and flips it vertically (Unity textures are bottom-up).
     /// </summary>
+
     public byte[] CaptureFrameFlipped()
     {
         byte[] raw = CaptureFrame();
@@ -183,9 +282,12 @@ public class FrameCapture : IDisposable
 
             if (screenCapture != null)
             {
+                screenCapture.Release();
                 UnityEngine.Object.Destroy(screenCapture);
                 screenCapture = null;
             }
+
+            ReleaseSmallTarget();
 
             disposed = true;
             initialized = false;

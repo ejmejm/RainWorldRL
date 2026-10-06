@@ -1,7 +1,14 @@
-# Shared Memory Protocol (v3)
+# Shared Memory Protocol (v4)
+
+The version is `PROTOCOL_VERSION` in `rainworld_rl/shared_memory.py` and `SharedMemoryBridge.cs`, sent in
+the header at offset 15. Bump it whenever the header layout or the meaning of a field/command changes.
 
 Named memory-mapped file `RainWorldRL`, created by whichever side comes first
 (`MemoryMappedFile.CreateOrOpen` in C#, `mmap(-1, size, tagname=...)` in Python).
+On Linux, where the game runs under Wine, the mapping is instead the file named by
+the `RAINWORLD_RL_SHM` environment variable (a `/dev/shm` file, which Wine sees as
+`Z:\dev\shm\...`), mapped by both sides; the launcher sets it per instance. If
+`RAINWORLD_RL_SAVE_DIR` is set, the mod keeps the RL save there.
 Total size = `HEADER_SIZE + MAX_FRAME_SIZE` = 64 + 1920*1080*3.
 
 All multi-byte integers are little-endian. Floats are IEEE-754 float32.
@@ -16,10 +23,10 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 3      | 1    | both    | `status`           | see Status bits |
 | 4      | 4    | py→mod  | `frame_width`      | uint32, clamped by mod to 1..1920 (default 160) |
 | 8      | 4    | py→mod  | `frame_height`     | uint32, clamped by mod to 1..1080 (default 90) |
-| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested). Mod sets back to 0 when done. |
+| 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested), 3 ENTER_SHELTER (debug: send player 0 into its den shelter with `command_arg` food pips so a real hibernation can be tested), 4 HOP_ROOM / 5 SWITCH_REGION (debug: send player 0 into a neighbouring room / region, for soak tests of room and region loading). Mod sets back to 0 when done. |
 | 13     | 1    | mod→py  | `command_result`   | 0 none/in-progress, 1 OK, 2 ERROR. Mod writes after finishing a command; Python clears to 0 before issuing the next. |
 | 14     | 1    | mod→py  | `game_flags`       | b0 IN_SHELTER (level), b1 CYCLE_SURVIVED (edge: hibernation succeeded during this step), b2 RAIN (level: cycle end has begun), b3 DIALOG_OPEN (level: an in-game prompt awaits a key press - a `Menu.Dialog` side process, the game-over "press X to restart" prompt, or an open pause menu; see **Action bits**) |
-| 15     | 1    | -       | reserved           | |
+| 15     | 1    | mod→py  | `protocol_version` | uint8, `PROTOCOL_VERSION` (4), written as soon as the mapping exists, so it is present whenever `MOD_ALIVE` is. A mod build from before versioning leaves 0. |
 | 16     | 4    | mod→py  | `heartbeat`        | uint32, incremented every Unity Update while the mod is alive (even in menus). Python uses it to detect a live game. |
 | 20     | 4    | mod→py  | `step_counter`     | uint32, incremented once per completed step (frame signalled) |
 | 24     | 1    | mod→py  | `karma`            | uint8, current karma level (0 if not in game) |
@@ -35,7 +42,8 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 52     | 1    | mod→py  | `food_to_hibernate`| uint8, food pips needed to hibernate this cycle (`SlugcatStats.foodToHibernate`; Survivor 4; equals `food_max` while malnourished; 0 if unavailable) |
 | 53     | 1    | mod→py  | `malnourished`     | uint8 0/1 (level), `SaveState.malnourished`: the previous sleep was a starving one, so this cycle needs `food_max` pips to sleep |
 | 54     | 4    | mod→py  | `region`           | ASCII region acronym of the active world (`World.region.name`, e.g. `SU`, `HI`), NUL-padded to 4 bytes; all NUL (empty string) when no world is loaded. Combine with `room_index` for a save-wide room key: room indices are only unique within a region. |
-| 58     | 6    | -       | reserved           | |
+| 58     | 1    | py→mod  | `command_arg`      | uint8 argument of `command`, written before it (ENTER_SHELTER: food pips; HOP_ROOM: exit; SWITCH_REGION: gate; ignored by the others) |
+| 59     | 5    | -       | reserved           | |
 | 64     | N    | mod→py  | `frame`            | RGB24, row-major, top row first, width*height*3 bytes |
 
 ## Action bits (offset 44)
@@ -84,7 +92,7 @@ other game-state fields and cleared (with them) when no game state is available.
 | Bit | Name              | Kind  | Meaning |
 |----:|-------------------|-------|---------|
 | 0   | `IN_SHELTER`      | level | Player 0 is in a shelter room (`AbstractRoom.shelter`). |
-| 1   | `CYCLE_SURVIVED`  | edge  | Set for exactly one step: the player hibernated **with enough food** since the previous step (`RainWorldGame.Win` ran with `malnourished == false`, the SleepScreen path). A starving sleep (`Win(malnourished: true)`, StarveScreen) does **not** set it; it shows up as `cycle_number + 1` with `malnourished = 1`. The bit is delivered even if the game process has already switched for the sleep-screen redirect on that step (other fields may read as unavailable then). |
+| 1   | `CYCLE_SURVIVED`  | edge  | Set for exactly one step: the player hibernated **with enough food** since the previous step (`RainWorldGame.Win` ran with `malnourished == false`, the SleepScreen path). A starving sleep (`Win(malnourished: true)`, also via SleepScreen; StarveScreen is starving to death) does **not** set it; it shows up as `cycle_number + 1` with `malnourished = 1` (karma still goes up). The bit is delivered even if the game process has already switched for the sleep-screen redirect on that step (other fields may read as unavailable then). |
 | 2   | `RAIN`            | level | The cycle timer has expired and the lethal rain is falling: `RainCycle.TimeUntilRain <= 0` (= `RainCycle.RainGameOver`), the same instant `cycle_progress` crosses 1.0. The visual darkening before that (`RainDarkPalette`) is *not* included. |
 | 3   | `DIALOG_OPEN`     | level | A text/dialog overlay awaits player input. |
 
@@ -105,9 +113,9 @@ read-modify-write only its own bits (read status, mask, write back).
 ## Step handshake
 
 1. Python writes `action_bits`, `ticks_per_step`, then `sync_flag = ACTION_READY`.
-2. Mod (in Update) sees ACTION_READY → reads action_bits/ticks → writes `sync_flag = PROCESSING` → unpauses at high timescale. The keys stay held until the next action is consumed.
-3. Mod counts FixedUpdates; after `ticks_per_step` ticks it pauses (timescale 0).
-4. Mod (in OnPostRender) captures the frame, writes all mod→py header fields (status edge bits, karma, food, pos, ...), increments `step_counter`, then writes `sync_flag = FRAME_READY` **last**.
+2. Mod sees ACTION_READY → reads action_bits/ticks → writes `sync_flag = PROCESSING`. The keys stay held until the next action is consumed.
+3. Mod runs exactly `ticks_per_step` game ticks (40 per second of game time), then renders the game camera once. While `READY` (the agent playing) this all happens inside one Unity frame, time stays frozen between steps, and the mod waits a few ms in that frame for the next action, so consecutive steps can share a frame. While not `READY` it unpauses at high timescale and counts FixedUpdates instead.
+4. Mod (in the camera's post-render) captures the frame from the camera's render texture, writes all mod→py header fields (status edge bits, karma, food, pos, ...), increments `step_counter`, then writes `sync_flag = FRAME_READY` **last**.
 5. Python sees FRAME_READY → reads frame + header fields → writes `sync_flag = IDLE`.
 
 While `HUMAN_OVERRIDE` is set the mod does not service steps; Python keeps waiting
@@ -119,13 +127,33 @@ are zeroed/-1 and `IN_GAME` is clear. (The mod is expected to auto-return to the
 
 ## Commands (offset 12)
 
-Python clears `command_result` to 0, writes a command (`RESET` or `KILL_PLAYER`), then polls `command_result`
+Python clears `command_result` to 0, writes `command_arg` and a command (`RESET`, `KILL_PLAYER`, `ENTER_SHELTER`, `HOP_ROOM` or `SWITCH_REGION`), then polls `command_result`
 until nonzero (timeout ~60s). The mod performs the command on the main thread, writes
 `command_result`, then writes `command = NONE`. RESET = delete the RL save directory
 contents, start a fresh story game as the configured slugcat, wait until `READY`, then ack.
 KILL_PLAYER = kill player 0 immediately (the following step reports the `PLAYER_DEAD` edge and the
 normal respawn flow runs); ack once the kill has been applied (`ERROR` if RL mode is not fully on,
 no realized player 0 exists, or it is already dead). The ack never waits for the respawn.
+ENTER_SHELTER = set player 0's food to `command_arg` pips and send it into its den shelter (the save's
+den, or the slugcat's default shelter while the den is not one, e.g. on a fresh save) through the shelter's
+entrance pipe, as if it had walked in; ack at once (`ERROR` as for HOP_ROOM, or if that shelter is not in
+the current region). The game's own shelter logic takes over: with `food_to_hibernate` pips the slugcat
+hibernates once it stands still more than 6 tiles from the entrance; with fewer (at least 1) holding `down`
+there for 260 ticks makes it sleep starving. Either way the door closes in 320 ticks and the cycle reloads.
+HOP_ROOM = send player 0 out through exit `command_arg % n` of its room's `n` usable exits (exits that lead
+nowhere, e.g. a gate room's far side, are skipped) into the neighbouring room, arriving from the pipe that leads
+back, the same path as walking through that pipe; ack at once (`ERROR` if RL mode is not fully on, player 0 is
+not alive in a room, it is already on its way between rooms - in or entering a pipe, or a gate or SWITCH_REGION
+is loading a region - or the room has no usable exit). `READY` stays set: `room_index` changes once the next room
+has loaded and the slugcat is in its pipe (typically within ~10 ticks); it comes out of the pipe within a few
+dozen ticks more.
+SWITCH_REGION = take player 0 through region gate `command_arg % n` of its region's `n` usable gates (in world-file
+order) into the neighbouring region with the game's own gate and world-loading code, skipping the karma
+requirement: the slugcat is sent into the gate room through its pipe on this side and ignores input from then on;
+once it is in the room the mod starts the gate, `region` changes when the next region's world has loaded
+(a few hundred ticks), and the slugcat then leaves the gate room through its far exit into the new region and takes input
+again. Ack once it is on its way to the gate room (`ERROR` as for HOP_ROOM, or if the region has no usable gate).
+Other moves are rejected until it has left the gate room. A death or RESET meanwhile abandons the switch.
 
 Death -> respawn (any death, not just KILL_PLAYER): the game only leaves its "game over" prompt on a
 key press that injected RL input cannot produce, so while RL mode is on the mod presses it itself
@@ -137,6 +165,7 @@ start-of-cycle shelter.
 ## Connect handshake (Python side)
 
 1. Open the mapping. Read `heartbeat` twice ~100 ms apart; if it did not change and `MOD_ALIVE` is clear → no game running → raise.
+   Then check `protocol_version == PROTOCOL_VERSION`; on a mismatch close the mapping and raise `ProtocolVersionError` (without setting `CONNECTED`).
 2. Write `frame_width/height`, set `CONNECTED`.
 3. Wait for `READY` (timeout configurable, default 60 s; the mod may still be entering the game).
 4. Done. `disconnect()` clears `CONNECTED` and the mod returns the game to normal play.

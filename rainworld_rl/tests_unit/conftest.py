@@ -1,8 +1,8 @@
 """
 Pytest setup for the game-free unit tests.
 
-The package is imported as ``rainworld_rl.*`` (the repository directory
-is the top-level package), so the repository's *parent* must be importable.
+The package is imported as ``rainworld_rl.*``; putting the repository root on
+``sys.path`` makes that work without ``pip install -e .``.
 """
 
 import sys
