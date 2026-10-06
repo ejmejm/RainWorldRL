@@ -34,6 +34,9 @@
     <Reference Include="UnityEngine.InputLegacyModule">
       <HintPath>$(RainWorldManaged)/UnityEngine.InputLegacyModule.dll</HintPath>
     </Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule">
+      <HintPath>$(RainWorldManaged)/UnityEngine.ScreenCaptureModule.dll</HintPath>
+    </Reference>
 
     <!-- Rain World game code -->
     <Reference Include="Assembly-CSharp">

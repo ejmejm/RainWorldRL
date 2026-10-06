@@ -105,9 +105,9 @@ read-modify-write only its own bits (read status, mask, write back).
 ## Step handshake
 
 1. Python writes `action_bits`, `ticks_per_step`, then `sync_flag = ACTION_READY`.
-2. Mod (in Update) sees ACTION_READY → reads action_bits/ticks → writes `sync_flag = PROCESSING` → unpauses at high timescale. The keys stay held until the next action is consumed.
-3. Mod counts FixedUpdates; after `ticks_per_step` ticks it pauses (timescale 0).
-4. Mod (in OnPostRender) captures the frame, writes all mod→py header fields (status edge bits, karma, food, pos, ...), increments `step_counter`, then writes `sync_flag = FRAME_READY` **last**.
+2. Mod sees ACTION_READY → reads action_bits/ticks → writes `sync_flag = PROCESSING`. The keys stay held until the next action is consumed.
+3. Mod runs exactly `ticks_per_step` game ticks (40 per second of game time), then renders the game camera once. While `READY` (the agent playing) this all happens inside one Unity frame, time stays frozen between steps, and the mod waits a few ms in that frame for the next action, so consecutive steps can share a frame. While not `READY` it unpauses at high timescale and counts FixedUpdates instead.
+4. Mod (in the camera's post-render) captures the frame from the camera's render texture, writes all mod→py header fields (status edge bits, karma, food, pos, ...), increments `step_counter`, then writes `sync_flag = FRAME_READY` **last**.
 5. Python sees FRAME_READY → reads frame + header fields → writes `sync_flag = IDLE`.
 
 While `HUMAN_OVERRIDE` is set the mod does not service steps; Python keeps waiting
