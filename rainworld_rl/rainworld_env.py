@@ -53,16 +53,10 @@ The classic Discrete(18) set is available as ``rainworld_rl.wrappers.DiscreteAct
 While the human override (F10 in game) is active, ``step()`` blocks until it is
 released instead of timing out, and logs once via ``logging``.
 
-Importing / registration
-------------------------
-The repository directory is the package (``rainworld_rl``) and this module
-lives in its ``python`` subpackage, so the gym entry point is
-``rainworld_rl.rainworld_env:RainWorldEnv``. That requires the *parent*
-of the repository to be on ``sys.path`` (e.g. ``E:/projects`` for
-``E:/projects/rainworld_rl``), which is also what makes
-``from rainworld_rl import RainWorldEnv`` work. ``gym.make("RainWorld-v0")``
-only works after this module has been imported once (the ``gym.register``
-call is at the bottom of this file).
+Registration
+------------
+``gym.make("RainWorld-v0")`` works once ``rainworld_rl`` has been imported
+(the ``gym.register`` call is at the bottom of this file).
 """
 
 from __future__ import annotations
@@ -431,7 +425,7 @@ class RainWorldEnv(gym.Env):
         )
 
 
-# Register with Gymnasium. See the module docstring for the import-path caveat.
+# Register with Gymnasium.
 _ENV_ID = "RainWorld-v0"
 if _ENV_ID not in gym.registry:
     gym.register(id = _ENV_ID, entry_point = "rainworld_rl.rainworld_env:RainWorldEnv")

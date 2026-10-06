@@ -92,7 +92,7 @@ other game-state fields and cleared (with them) when no game state is available.
 | Bit | Name              | Kind  | Meaning |
 |----:|-------------------|-------|---------|
 | 0   | `IN_SHELTER`      | level | Player 0 is in a shelter room (`AbstractRoom.shelter`). |
-| 1   | `CYCLE_SURVIVED`  | edge  | Set for exactly one step: the player hibernated **with enough food** since the previous step (`RainWorldGame.Win` ran with `malnourished == false`, the SleepScreen path). A starving sleep (`Win(malnourished: true)`, StarveScreen) does **not** set it; it shows up as `cycle_number + 1` with `malnourished = 1`. The bit is delivered even if the game process has already switched for the sleep-screen redirect on that step (other fields may read as unavailable then). |
+| 1   | `CYCLE_SURVIVED`  | edge  | Set for exactly one step: the player hibernated **with enough food** since the previous step (`RainWorldGame.Win` ran with `malnourished == false`, the SleepScreen path). A starving sleep (`Win(malnourished: true)`, also via SleepScreen; StarveScreen is starving to death) does **not** set it; it shows up as `cycle_number + 1` with `malnourished = 1` (karma still goes up). The bit is delivered even if the game process has already switched for the sleep-screen redirect on that step (other fields may read as unavailable then). |
 | 2   | `RAIN`            | level | The cycle timer has expired and the lethal rain is falling: `RainCycle.TimeUntilRain <= 0` (= `RainCycle.RainGameOver`), the same instant `cycle_progress` crosses 1.0. The visual darkening before that (`RainDarkPalette`) is *not* included. |
 | 3   | `DIALOG_OPEN`     | level | A text/dialog overlay awaits player input. |
 

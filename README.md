@@ -48,6 +48,6 @@ to change the mod.
 - [x] Skip the fade-in after reset so the first observations are not black frames
 - [x] Scripted death (`env.debug_kill()`) so the death-edge e2e test can run
 - [x] Live test for the cycle-survived reward edge (real fed and starving hibernations via `env.debug_enter_shelter()`, `tests/e2e/test_sleep.py`)
-- [ ] Harden connect() against the game's synchronous initial load (occasional heartbeat false-negative right after launch)
+- [x] Harden connect() against the game's synchronous initial load (occasional heartbeat false-negative right after launch)
 - [x] Headless mode (Linux: Wine + Xvfb, see Quick start)
 - [x] Running multiple environments in parallel (Linux: `instance`)

@@ -24,7 +24,7 @@ that involves no exploration at all. Three facts from the game code
 (Rain World v1.11.8 decompile):
 
 1. **Early sleep is legal.** A slugcat with at least `food_to_hibernate` pips
-   standing still in a shelter hibernates after ~40 ticks of no input, no
+   standing still in a shelter hibernates after ~20 ticks of no input (40 with Remix), no
    matter how early in the cycle it is: `Player.cs` ~5734-5776 sets
    `readyForWin` when `FoodInRoom(...) >= foodToHibernate` and calls
    `room.shelterDoor.Close()` once `touchedNoInputCounter > 40`. (The *only*

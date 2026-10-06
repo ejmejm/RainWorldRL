@@ -37,7 +37,7 @@ using UnityEngine.Rendering;
 ///   CYCLE_SURVIVED (edge)        : latched by the On.RainWorldGame.Win hook (RainWorldGame.cs:1578) when the
 ///                                  player hibernated with enough food (malnourished == false; ShelterDoor.cs:1788),
 ///                                  reported on the next frame written and then cleared. A starving sleep
-///                                  (Win(malnourished: true) -> StarveScreen) does not count; it is visible as
+///                                  (Win(malnourished: true), also via SleepScreen) does not count; it is visible as
 ///                                  cycle_number + 1 together with malnourished == 1.
 ///   region                       : game.overWorld.activeWorld.region.name (World.cs:278, Region.cs:148), the
 ///                                  region acronym ("SU", "HI", ...); empty while no world is loaded.
@@ -161,7 +161,7 @@ public class StepController
     /// <summary>
     /// RainWorldGame.Win is the hibernation path (ShelterDoor.cs:1788 and the Watcher warp/echo paths).
     /// It is a no-op while a process switch is already pending (RainWorldGame.cs:1581), so only latch
-    /// when it actually ran. malnourished == true is the starving sleep (StarveScreen) and is not counted.
+    /// when it actually ran. malnourished == true is the starving sleep and is not counted.
     /// </summary>
     private void RainWorldGame_Win(On.RainWorldGame.orig_Win orig, RainWorldGame self, bool malnourished, bool fromWarpPoint)
     {
