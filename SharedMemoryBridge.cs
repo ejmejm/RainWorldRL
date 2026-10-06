@@ -136,10 +136,30 @@ public class SharedMemoryBridge : IDisposable
     /// <summary>True while Python holds the CONNECTED bit.</summary>
     public bool IsConnected => (ReadStatus() & STATUS_CONNECTED) != 0;
 
+    /// <summary>
+    /// If set, the mapping is backed by this file instead of the named mapping. Used under Wine,
+    /// where a named mapping is invisible to Linux processes: the launcher points it at a
+    /// /dev/shm file (as a Wine path, e.g. Z:\dev\shm\...) that Python maps too.
+    /// </summary>
+    public const string SHM_PATH_ENV_VAR = "RAINWORLD_RL_SHM";
+
+    /// <summary>Where the mapping lives: the backing file path, or the mapping name.</summary>
+    public string Location { get; }
+
     public SharedMemoryBridge()
     {
         int totalSize = HEADER_SIZE + MAX_FRAME_SIZE;
-        mmf = MemoryMappedFile.CreateOrOpen(SHARED_MEMORY_NAME, totalSize);
+        string path = Environment.GetEnvironmentVariable(SHM_PATH_ENV_VAR);
+        if (string.IsNullOrEmpty(path))
+        {
+            mmf = MemoryMappedFile.CreateOrOpen(SHARED_MEMORY_NAME, totalSize);
+            Location = SHARED_MEMORY_NAME;
+        }
+        else
+        {
+            mmf = MemoryMappedFile.CreateFromFile(path, System.IO.FileMode.OpenOrCreate, null, totalSize);
+            Location = path;
+        }
         accessor = mmf.CreateViewAccessor();
 
         // Reset the handshake and our own status bits. Python's CONNECTED bit and

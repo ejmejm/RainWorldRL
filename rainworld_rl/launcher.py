@@ -1,10 +1,11 @@
 """
 Build, deploy and launch Rain World with the RainWorldRL mod.
 
-This is Windows-only (the shared memory mapping is a named Windows file
-mapping, and the game is launched via ``RainWorld.exe``). **Steam must already
-be running**: the executable is started directly, and Rain World's Steam
-integration will fail (or bounce to Steam) if the client is not up.
+On Windows ``RainWorld.exe`` is started directly and one instance runs per
+machine. On Linux each instance runs under Wine on its own Xvfb display,
+optionally inside the Apptainer image ``config.container``, with its own Wine
+prefix and a /dev/shm file as the shared memory (``default_shm_path``). The
+Steam client is not needed.
 
 Pipeline used by ``launch()``::
 
@@ -23,18 +24,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import Config, REPO_ROOT, load_config
 from .shared_memory import (
     GameNotRunningError,
     ReadyTimeoutError,
     SharedMemoryClient,
+    default_shm_path,
 )
 
 
@@ -58,30 +62,48 @@ class LaunchError(RuntimeError):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def tail_log(config: Config, lines: int = LOG_TAIL_LINES) -> str:
-    """Return the last ``lines`` lines of ``BepInEx/LogOutput.log`` (or a note if missing)."""
-    log_path = config.bepinex_log
+def game_log_path(config: Config, instance: int = 0) -> Path:
+    """
+    The log to show on failures: ``BepInEx/LogOutput.log`` on Windows; on Linux
+    the instance's console output (it includes the BepInEx log lines), since
+    instances share the game directory.
+    """
+    if sys.platform == "win32":
+        return config.bepinex_log
+    return config.wine_prefix_dir / f"{instance}.log"
+
+
+def tail_log(config: Config, lines: int = LOG_TAIL_LINES, instance: int = 0) -> str:
+    """Return the last ``lines`` lines of ``game_log_path()`` (or a note if missing)."""
+    log_path = game_log_path(config, instance)
     try:
         text = log_path.read_text(encoding = "utf-8", errors = "replace")
     except OSError:
-        return f"(no BepInEx log at {log_path})"
+        return f"(no log at {log_path})"
     tail = text.splitlines()[-lines:]
     if not tail:
-        return f"(BepInEx log at {log_path} is empty)"
+        return f"(log at {log_path} is empty)"
     return "\n".join(tail)
 
 
-def _launch_error(config: Config, message: str) -> LaunchError:
+def _launch_error(config: Config, message: str, instance: int = 0) -> LaunchError:
     return LaunchError(
-        f"{message}\n\n--- last {LOG_TAIL_LINES} lines of {config.bepinex_log} ---\n{tail_log(config)}"
+        f"{message}\n\n--- last {LOG_TAIL_LINES} lines of {game_log_path(config, instance)} ---\n"
+        f"{tail_log(config, instance = instance)}"
     )
 
 
-def _run(cmd: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+def _run(
+    cmd: Sequence[str],
+    cwd: Optional[Path] = None,
+    timeout: Optional[float] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> subprocess.CompletedProcess:
     logger.debug("Running: %s", " ".join(cmd))
     return subprocess.run(
         list(cmd),
         cwd = str(cwd) if cwd else None,
+        env = env,
         capture_output = True,
         text = True,
         encoding = "utf-8",
@@ -149,7 +171,10 @@ def deploy_dll(config: Optional[Config] = None, built_dll: Optional[Path] = None
             f"Plugins directory not found: {config.plugins_dir}. Is BepInEx installed and game_dir correct?"
         )
     try:
-        shutil.copy2(built_dll, config.plugin_dll_path)
+        # Copy then rename: on Linux, game instances that are still running keep the old file.
+        tmp = config.plugin_dll_path.with_suffix(".dll.tmp")
+        shutil.copy2(built_dll, tmp)
+        os.replace(tmp, config.plugin_dll_path)
     except PermissionError as e:
         raise LaunchError(
             f"Could not overwrite {config.plugin_dll_path} (is the game running? use restart=True)"
@@ -162,23 +187,24 @@ def deploy_dll(config: Optional[Config] = None, built_dll: Optional[Path] = None
 # Process control
 # ---------------------------------------------------------------------------
 
-def is_game_running() -> bool:
-    """True if a ``RainWorld.exe`` process exists."""
+def is_game_running(instance: int = 0) -> bool:
+    """True if the game is running (Windows: any ``RainWorld.exe``; Linux: this instance)."""
     if sys.platform != "win32":
-        return False
+        return _linux_game_pgid(instance) is not None
     result = _run(["tasklist", "/FI", f"IMAGENAME eq {GAME_PROCESS_NAME}", "/NH", "/FO", "CSV"])
     return GAME_PROCESS_NAME.lower() in result.stdout.lower()
 
 
-def kill_game(timeout: float = 15.0) -> bool:
+def kill_game(timeout: float = 15.0, instance: int = 0) -> bool:
     """
-    Terminate every running ``RainWorld.exe`` and wait for it to exit.
+    Terminate the game and wait for it to exit (Windows: every ``RainWorld.exe``;
+    Linux: this instance's process group).
 
     Returns:
         True if a process was killed, False if none was running.
     """
     if sys.platform != "win32":
-        raise LaunchError("kill_game() is only supported on Windows")
+        return _kill_game_linux(timeout, instance)
     if not is_game_running():
         return False
 
@@ -195,15 +221,17 @@ def kill_game(timeout: float = 15.0) -> bool:
     return True
 
 
-def start_game(config: Optional[Config] = None) -> subprocess.Popen:
+def start_game(config: Optional[Config] = None, instance: int = 0) -> subprocess.Popen:
     """
-    Launch ``RainWorld.exe`` directly (not through Steam's URL handler).
+    Launch ``RainWorld.exe`` directly (Windows) or under Wine (Linux).
 
-    Steam must be running. The returned Popen handle is informational: the
-    game is not a child we wait on, and closing Python does not close it.
+    The returned Popen handle is informational: the game is not a child we
+    wait on, and closing Python does not close it.
     """
     config = config or load_config()
     config.validate_game_dir()
+    if sys.platform != "win32":
+        return _start_game_linux(config, instance)
     logger.info("Starting %s", config.exe_path)
     try:
         return subprocess.Popen(
@@ -219,10 +247,191 @@ def start_game(config: Optional[Config] = None) -> subprocess.Popen:
 
 
 # ---------------------------------------------------------------------------
+# Linux: Wine + Xvfb, optionally inside Apptainer
+# ---------------------------------------------------------------------------
+
+# winhttp: BepInEx's doorstop proxy DLL must win over Wine's builtin. mscoree/mshtml:
+# skip the wine-mono / wine-gecko installers (Unity brings its own Mono).
+WINE_DLL_OVERRIDES = "winhttp=n,b;mscoree=;mshtml="
+XVFB_SCREEN = "1366x768x24"
+
+# Create a Wine prefix. If the image ships DXVK (/opt/dxvk), install it: D3D11 -> Vulkan on lavapipe
+# renders ~1.5x faster than Wine's own D3D11 -> OpenGL on llvmpipe. DXVK crashes (division by zero in
+# dxgi) on the display modes Wine reads from Xvfb via XRandR, so XRandR/XVidMode are turned off.
+_INIT_PREFIX = r"""
+wineboot -i || exit 1
+if [ -d /opt/dxvk ]; then
+  for dll in d3d11 dxgi d3d10core; do
+    cp --remove-destination "/opt/dxvk/x64/$dll.dll" "$WINEPREFIX/drive_c/windows/system32/" || exit 1
+    wine reg add 'HKCU\Software\Wine\DllOverrides' /v "$dll" /d native /f || exit 1
+  done
+  wine reg add 'HKCU\Software\Wine\X11 Driver' /v UseXRandR /d N /f || exit 1
+  wine reg add 'HKCU\Software\Wine\X11 Driver' /v UseXVidMode /d N /f || exit 1
+fi
+wineserver -w
+"""
+
+# The OpenGL renderers (wsl, virtualgl) need Wine's own D3D11 -> OpenGL, not the DXVK in the prefix.
+WINED3D_OVERRIDES = WINE_DLL_OVERRIDES + ";d3d11,dxgi,d3d10core=b"
+
+WSL_LIB_DIR = "/usr/lib/wsl"  # WSL2's GPU user-space libraries (libd3d12, libdxcore)
+
+# Start a private Xvfb (-displayfd picks a free display without races) and run the
+# command line (``[vglrun ...] wine RainWorld.exe``) on it.
+_RUN_ON_XVFB = r"""
+coproc XVFB { exec Xvfb -displayfd 1 -nolisten tcp -screen 0 "$RAINWORLD_RL_SCREEN"; }
+read -r -u "${XVFB[0]}" display || { echo "Xvfb failed to start" >&2; exit 1; }
+trap 'kill $XVFB_PID 2>/dev/null' EXIT
+DISPLAY=":$display" "$@"
+"""
+
+
+def _in_container(config: Config, cmd: List[str]) -> List[str]:
+    """Wrap ``cmd`` in ``apptainer exec`` when ``config.container`` is set."""
+    if config.container is None:
+        return cmd
+    args = [a for d in (config.game_dir, config.wine_prefix_dir) for a in ("--bind", str(d))]
+    if config.renderer == "wsl":
+        args += ["--bind", WSL_LIB_DIR, "--env", f"LD_LIBRARY_PATH={WSL_LIB_DIR}/lib"]
+    if config.renderer == "virtualgl" and Path("/dev/nvidiactl").exists():
+        args.append("--nv")  # bind the host's NVIDIA driver (its EGL library) into the container
+    return ["apptainer", "exec", *args, "--pwd", str(config.game_dir), str(config.container), *cmd]
+
+
+def _renderer(config: Config) -> Tuple[Dict[str, str], List[str]]:
+    """
+    Environment and command prefix for ``config.renderer``:
+
+    * ``cpu``: on the CPU: DXVK on Mesa lavapipe when the prefix has DXVK,
+      else Wine's OpenGL on llvmpipe. Works everywhere.
+    * ``wsl``: WSL2's GPU through Mesa's d3d12 driver (needs /dev/dxg).
+    * ``virtualgl``: the first EGL device (a GPU) through VirtualGL, which
+      redirects the game's GLX rendering off the virtual X display. NVIDIA:
+      proprietary driver, bound in with ``apptainer --nv``; AMD/Intel: Mesa
+      on /dev/dri.
+    """
+    if config.renderer == "wsl":
+        if not Path("/dev/dxg").exists():
+            raise LaunchError("renderer = 'wsl' needs WSL2's GPU device /dev/dxg")
+        return {"GALLIUM_DRIVER": "d3d12", "WINEDLLOVERRIDES": WINED3D_OVERRIDES}, []
+    if config.renderer == "virtualgl":
+        # VGL_READBACK=none: don't copy every frame back to the CPU to show it on Xvfb. Nothing
+        # looks at the display (the mod captures on the GPU), and the readback halves steps/s.
+        return {"WINEDLLOVERRIDES": WINED3D_OVERRIDES, "VGL_READBACK": "none"}, ["vglrun", "-d", "egl"]
+    return {}, []
+
+
+def _wine_env(prefix: Path) -> Dict[str, str]:
+    env = {**os.environ, "WINEPREFIX": str(prefix), "WINEDEBUG": "-all", "WINEDLLOVERRIDES": WINE_DLL_OVERRIDES}
+    env.pop("TMPDIR", None)  # Wine 9.0 aborts (free(): invalid pointer) when TMPDIR is set, as on Slurm nodes
+    return env
+
+
+def _ensure_prefix(config: Config, instance: int) -> Path:
+    """
+    Return this instance's Wine prefix. The first call runs ``wineboot`` once
+    into ``<wine_prefix_dir>/base``; each instance gets a hard-linked copy of it
+    (near-zero disk, and its own wineserver and AppData).
+    """
+    import fcntl
+
+    prefix_dir = config.wine_prefix_dir
+    prefix = prefix_dir / str(instance)
+    if prefix.is_dir():
+        return prefix
+    prefix_dir.mkdir(parents = True, exist_ok = True)
+    base = prefix_dir / "base"
+    with open(prefix_dir / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # concurrent launches: one creates base, the rest wait
+        if not base.is_dir():
+            logger.info("Creating Wine prefix %s (one-time, ~30 s)", base)
+            result = _run(_in_container(config, ["sh", "-c", _INIT_PREFIX]), env = _wine_env(base), timeout = 600)
+            if result.returncode != 0:
+                shutil.rmtree(base, ignore_errors = True)
+                raise LaunchError(f"wineboot failed:\n{result.stdout}\n{result.stderr}")
+        if not prefix.is_dir():
+            tmp = prefix_dir / f".{instance}.tmp"
+            shutil.rmtree(tmp, ignore_errors = True)
+            subprocess.run(["cp", "-al", str(base), str(tmp)], check = True)
+            tmp.rename(prefix)
+    return prefix
+
+
+def _linux_pidfile(instance: int) -> Path:
+    return Path(default_shm_path(instance) + ".pid")
+
+
+def _linux_game_pgid(instance: int) -> Optional[int]:
+    """Process group of this instance's game (from its pidfile), or None if it is not running."""
+    try:
+        pgid = int(_linux_pidfile(instance).read_text())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.waitpid(pgid, os.WNOHANG)  # reap the group leader if it is our exited child
+    except ChildProcessError:
+        pass
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return None
+    return pgid
+
+
+def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
+    prefix = _ensure_prefix(config, instance)
+    shm = default_shm_path(instance)
+    Path(shm).unlink(missing_ok = True)  # fresh mapping: no stale header from an earlier run
+    env = _wine_env(prefix)
+    env["RAINWORLD_RL_SCREEN"] = XVFB_SCREEN
+    env["RAINWORLD_RL_SHM"] = "Z:" + shm.replace("/", "\\")  # Wine maps / to drive Z:
+    env["RAINWORLD_RL_SAVE_DIR"] = "C:\\rainworld_rl_save"  # inside this instance's prefix
+    env["RAINWORLD_RL_SMALL_WINDOW"] = "1"  # nobody watches the Xvfb window: skip full-size compositing while the agent plays
+    renderer_env, wrapper = _renderer(config)
+    env.update(renderer_env)
+    env.setdefault("DXVK_LOG_PATH", "none")  # DXVK would write logs into the shared game dir; stderr still has them
+    cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
+    log_path = prefix.with_suffix(".log")
+    logger.info("Starting instance %d: %s (output in %s)", instance, config.exe_path, log_path)
+    with open(log_path, "wb") as log:
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd = str(config.game_dir),
+                env = env,
+                stdin = subprocess.DEVNULL,
+                stdout = log,
+                stderr = subprocess.STDOUT,
+                start_new_session = True,  # own process group, so kill_game can take down Xvfb + wine together
+            )
+        except OSError as e:
+            raise LaunchError(f"Failed to start {cmd[0]}: {e}") from e
+    _linux_pidfile(instance).write_text(str(process.pid))
+    return process
+
+
+def _kill_game_linux(timeout: float, instance: int) -> bool:
+    pgid = _linux_game_pgid(instance)
+    if pgid is None:
+        return False
+    logger.info("Killing game instance %d (process group %d)", instance, pgid)
+    os.killpg(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while _linux_game_pgid(instance) is not None:
+        if time.monotonic() >= deadline:
+            os.killpg(pgid, signal.SIGKILL)
+            break
+        time.sleep(0.25)
+    _linux_pidfile(instance).unlink(missing_ok = True)
+    Path(default_shm_path(instance)).unlink(missing_ok = True)  # /dev/shm counts against job memory
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Waiting on the mod
 # ---------------------------------------------------------------------------
 
-def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float] = None) -> None:
+def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float] = None, instance: int = 0) -> None:
     """
     Block until the mod's heartbeat advances (``MOD_ALIVE`` + changing heartbeat).
 
@@ -232,7 +441,7 @@ def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float]
     config = config or load_config()
     timeout = config.launch_timeout if timeout is None else timeout
     deadline = time.monotonic() + timeout
-    client = SharedMemoryClient()
+    client = SharedMemoryClient(shm_path = default_shm_path(instance))
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -240,6 +449,7 @@ def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float]
                 raise _launch_error(
                     config,
                     f"The RainWorldRL mod did not come alive within {timeout:.0f}s of starting the game.",
+                    instance,
                 )
             try:
                 # alive_grace = 0: this loop does its own retrying and process check.
@@ -247,17 +457,22 @@ def wait_for_mod_alive(config: Optional[Config] = None, timeout: Optional[float]
                 logger.info("Mod is alive")
                 return
             except GameNotRunningError:
-                if not is_game_running():
+                if not is_game_running(instance):
                     # Give it a moment: the process may not have been spawned yet.
                     time.sleep(0.5)
-                    if not is_game_running():
-                        raise _launch_error(config, f"{GAME_PROCESS_NAME} is not running (it exited or failed to start).")
+                    if not is_game_running(instance):
+                        raise _launch_error(config, f"{GAME_PROCESS_NAME} is not running (it exited or failed to start).", instance)
                 time.sleep(0.5)
     finally:
         client.disconnect()
 
 
-def wait_for_ready(config: Optional[Config] = None, timeout: Optional[float] = None, ready_timeout: float = 60.0) -> None:
+def wait_for_ready(
+    config: Optional[Config] = None,
+    timeout: Optional[float] = None,
+    ready_timeout: float = 60.0,
+    instance: int = 0,
+) -> None:
     """
     Wait for the mod to be alive, then connect, wait for ``READY`` and disconnect.
 
@@ -265,13 +480,13 @@ def wait_for_ready(config: Optional[Config] = None, timeout: Optional[float] = N
     users should prefer ``RainWorldEnv.connect()``, which keeps the connection.
     """
     config = config or load_config()
-    wait_for_mod_alive(config, timeout)
-    client = SharedMemoryClient()
+    wait_for_mod_alive(config, timeout, instance)
+    client = SharedMemoryClient(shm_path = default_shm_path(instance))
     try:
         client.connect(wait_ready = True, ready_timeout = ready_timeout)
         logger.info("Mod is READY")
     except (GameNotRunningError, ReadyTimeoutError) as e:
-        raise _launch_error(config, str(e)) from e
+        raise _launch_error(config, str(e), instance) from e
     finally:
         client.disconnect()
 
@@ -285,6 +500,7 @@ def launch(
     build: bool = True,  # noqa: A002 - mirrors the CLI flag name
     restart: bool = True,
     timeout: Optional[float] = None,
+    instance: int = 0,
 ) -> Optional[subprocess.Popen]:
     """
     Build (optional), (re)start the game and wait for the mod's heartbeat.
@@ -294,6 +510,8 @@ def launch(
         restart: Kill a running game first. If False and the game is already
             running, nothing is started; we just wait for the mod to be alive.
         timeout: Seconds to wait for the mod heartbeat (default ``config.launch_timeout``).
+        instance: Which game instance (Linux only; each has its own display,
+            Wine prefix and shared memory).
 
     Returns:
         The Popen handle if a new process was started, else None.
@@ -309,13 +527,13 @@ def launch(
         built_dll = build_mod(config, deploy = False)
 
     process = None
-    running = is_game_running()
+    running = is_game_running(instance)
     if restart or not running:
         if running:
-            kill_game()
+            kill_game(instance = instance)
         if build:
             deploy_dll(config, built_dll)
-        process = start_game(config)
+        process = start_game(config, instance)
     else:
         if build:
             logger.warning("Game is running and restart=False; deploying the DLL may fail if it is locked")
@@ -323,10 +541,10 @@ def launch(
         logger.info("Game already running; attaching without restart")
 
     try:
-        wait_for_mod_alive(config, timeout)
+        wait_for_mod_alive(config, timeout, instance)
     except LaunchError:
         if process is not None and process.poll() is not None:
-            raise _launch_error(config, f"{GAME_PROCESS_NAME} exited with code {process.returncode} during startup.")
+            raise _launch_error(config, f"{GAME_PROCESS_NAME} exited with code {process.returncode} during startup.", instance)
         raise
     return process
 
@@ -338,7 +556,7 @@ def launch(
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog = "python -m rainworld_rl.launcher",
-        description = "Build, deploy and launch Rain World with the RainWorldRL mod (Steam must be running).",
+        description = "Build, deploy and launch Rain World with the RainWorldRL mod.",
     )
     parser.add_argument("--no-build", action = "store_true", help = "Skip dotnet build / DLL deploy")
     parser.add_argument("--no-restart", action = "store_true", help = "Do not kill an already-running game")
@@ -347,6 +565,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--kill", action = "store_true", help = "Kill a running game and exit")
     parser.add_argument("--config", type = Path, default = None, help = "Path to a rainworld_rl.toml")
     parser.add_argument("--timeout", type = float, default = None, help = "Override launch_timeout (seconds)")
+    parser.add_argument("--instance", type = int, default = 0, help = "Game instance (Linux only)")
     parser.add_argument("-v", "--verbose", action = "store_true", help = "Debug logging")
     args = parser.parse_args(argv)
 
@@ -363,7 +582,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.info("Using default config (game_dir=%s)", config.game_dir)
 
         if args.kill:
-            print("Killed running game" if kill_game() else "No game running")
+            print("Killed running game" if kill_game(instance = args.instance) else "No game running")
             return 0
 
         if args.build_only:
@@ -373,9 +592,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Deployed {path}")
             return 0
 
-        launch(config, build = not args.no_build, restart = not args.no_restart, timeout = args.timeout)
+        launch(config, build = not args.no_build, restart = not args.no_restart, timeout = args.timeout, instance = args.instance)
         if args.wait_ready:
-            wait_for_ready(config, timeout = 1.0)
+            wait_for_ready(config, timeout = 1.0, instance = args.instance)
         print("Rain World is running with the RainWorldRL mod alive.")
         return 0
     except LaunchError as e:
