@@ -152,7 +152,7 @@ def game(e2e_options: SimpleNamespace, api: SimpleNamespace):
     """
     Session-wide connected ``RainWorldEnv``.
 
-    * default: ``env.launch(build=not --no-build, restart=True)`` -> build, deploy, start, wait READY
+    * default: ``env.launch(restart=True)`` -> build if possible (else deploy the packaged DLL), start, wait READY
     * ``--no-launch``: ``env.connect()`` to an already-running game
 
     Teardown closes the env and (unless ``--no-launch``) kills the game.
@@ -168,7 +168,7 @@ def game(e2e_options: SimpleNamespace, api: SimpleNamespace):
         if e2e_options.no_launch:
             env.connect()
         else:
-            env.launch(build=not e2e_options.no_build, restart=True)
+            env.launch(build=False if e2e_options.no_build else None, restart=True)
     except api.GameNotRunningError as exc:
         pytest.exit(
             "--no-launch given but no running Rain World with the RainWorldRL mod was found: "
