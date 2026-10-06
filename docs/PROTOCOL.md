@@ -1,4 +1,7 @@
-# Shared Memory Protocol (v3)
+# Shared Memory Protocol (v4)
+
+The version is `PROTOCOL_VERSION` in `rainworld_rl/shared_memory.py` and `SharedMemoryBridge.cs`, sent in
+the header at offset 15. Bump it whenever the header layout or the meaning of a field/command changes.
 
 Named memory-mapped file `RainWorldRL`, created by whichever side comes first
 (`MemoryMappedFile.CreateOrOpen` in C#, `mmap(-1, size, tagname=...)` in Python).
@@ -23,7 +26,7 @@ All multi-byte integers are little-endian. Floats are IEEE-754 float32.
 | 12     | 1    | py→mod  | `command`          | 0 NONE, 1 RESET (wipe RL save, start fresh game), 2 KILL_PLAYER (debug: kill player 0 so the death edge and respawn flow can be tested). Mod sets back to 0 when done. |
 | 13     | 1    | mod→py  | `command_result`   | 0 none/in-progress, 1 OK, 2 ERROR. Mod writes after finishing a command; Python clears to 0 before issuing the next. |
 | 14     | 1    | mod→py  | `game_flags`       | b0 IN_SHELTER (level), b1 CYCLE_SURVIVED (edge: hibernation succeeded during this step), b2 RAIN (level: cycle end has begun), b3 DIALOG_OPEN (level: an in-game prompt awaits a key press - a `Menu.Dialog` side process, the game-over "press X to restart" prompt, or an open pause menu; see **Action bits**) |
-| 15     | 1    | -       | reserved           | |
+| 15     | 1    | mod→py  | `protocol_version` | uint8, `PROTOCOL_VERSION` (4), written as soon as the mapping exists, so it is present whenever `MOD_ALIVE` is. A mod build from before versioning leaves 0. |
 | 16     | 4    | mod→py  | `heartbeat`        | uint32, incremented every Unity Update while the mod is alive (even in menus). Python uses it to detect a live game. |
 | 20     | 4    | mod→py  | `step_counter`     | uint32, incremented once per completed step (frame signalled) |
 | 24     | 1    | mod→py  | `karma`            | uint8, current karma level (0 if not in game) |
@@ -141,6 +144,7 @@ start-of-cycle shelter.
 ## Connect handshake (Python side)
 
 1. Open the mapping. Read `heartbeat` twice ~100 ms apart; if it did not change and `MOD_ALIVE` is clear → no game running → raise.
+   Then check `protocol_version == PROTOCOL_VERSION`; on a mismatch close the mapping and raise `ProtocolVersionError` (without setting `CONNECTED`).
 2. Write `frame_width/height`, set `CONNECTED`.
 3. Wait for `READY` (timeout configurable, default 60 s; the mod may still be entering the game).
 4. Done. `disconnect()` clears `CONNECTED` and the mod returns the game to normal play.

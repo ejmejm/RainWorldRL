@@ -27,8 +27,10 @@ from rainworld_rl import shared_memory as sm
 
 
 class FakeMapping(bytearray):
-    def __init__(self, size: int = sm.TOTAL_SIZE, alive: bool = True, auto_ready: bool = True):
+    def __init__(self, size: int = sm.TOTAL_SIZE, alive: bool = True, auto_ready: bool = True,
+                 protocol_version: int = sm.PROTOCOL_VERSION):
         super().__init__(size)
+        self.put(sm.OFFSET_PROTOCOL_VERSION, bytes((protocol_version,)))  # like the mod: as soon as the mapping exists
         self.alive = alive
         # Like the real mod: once Python sets CONNECTED, enter RL mode and
         # raise IN_GAME + READY on the next tick.

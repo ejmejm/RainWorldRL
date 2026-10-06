@@ -10,7 +10,7 @@ using UnityEngine;
 
 /// <summary>
 /// Rain World RL - Turns Rain World into a reinforcement learning environment.
-/// Communicates with Python via shared memory (protocol v3, docs/PROTOCOL.md).
+/// Communicates with Python via shared memory (protocol v4, docs/PROTOCOL.md).
 ///
 /// RL mode is driven by Python's CONNECTED status bit: rising edge enters RL mode (swap to the
 /// isolated RL save, auto-start a story game), falling edge exits it (save, return to the normal
