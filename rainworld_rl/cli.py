@@ -19,7 +19,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import download, launcher
+from . import __version__, download, launcher
 from .config import (
     CONFIG_FILENAME,
     LINUX_DATA_DIR,
@@ -30,7 +30,7 @@ from .config import (
 )
 
 
-DEFAULT_IMAGE = "docker://ghcr.io/ejmejm/rainworld-rl:latest"
+DEFAULT_IMAGE = f"docker://ghcr.io/ejmejm/rainworld-rl:v{__version__}"  # published by .github/workflows/container.yml
 
 
 def _write_config(config: Config, path: Path) -> None:
