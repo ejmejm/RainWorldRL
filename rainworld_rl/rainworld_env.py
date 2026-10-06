@@ -68,6 +68,7 @@ from .shared_memory import (
     ModState,
     SharedMemoryClient,
     action_to_bits,
+    default_shm_path,
 )
 
 
@@ -105,6 +106,7 @@ class RainWorldEnv(gym.Env):
         debug_timing: bool = False,
         config: Optional[Config] = None,
         client: Optional[SharedMemoryClient] = None,
+        instance: int = 0,
     ):
         """
         Args:
@@ -121,6 +123,8 @@ class RainWorldEnv(gym.Env):
                 ``rainworld_rl.toml`` / defaults by ``launch()`` if None.
             client: Pre-built ``SharedMemoryClient`` (used by unit tests to
                 inject a fake mapping). Normally None.
+            instance: Which game instance to drive (Linux only; see
+                ``launcher``). Each has its own shared memory.
         """
         super().__init__()
         if render_mode is not None and render_mode not in self.metadata["render_modes"]:
@@ -135,6 +139,7 @@ class RainWorldEnv(gym.Env):
         self.render_mode = render_mode
         self.debug_timing = debug_timing
         self.config = config
+        self.instance = instance
 
         self.observation_space = spaces.Box(
             low = 0, high = 255, shape = (frame_height, frame_width, 3), dtype = np.uint8
@@ -142,7 +147,7 @@ class RainWorldEnv(gym.Env):
         self.action_space = spaces.MultiBinary(NUM_KEYS)
 
         self._client: SharedMemoryClient = client or SharedMemoryClient(
-            frame_width, frame_height, debug_timing = debug_timing
+            frame_width, frame_height, debug_timing = debug_timing, shm_path = default_shm_path(instance)
         )
         self._last_frame: Optional[np.ndarray] = None
         self._last_state: Optional[ModState] = None
@@ -201,7 +206,7 @@ class RainWorldEnv(gym.Env):
 
         if self.connected:
             self.disconnect()
-        self._game_process = launcher.launch(self.config, build = build, restart = restart)
+        self._game_process = launcher.launch(self.config, build = build, restart = restart, instance = self.instance)
         self.connect(wait_ready = wait_ready)
 
     def disconnect(self) -> None:

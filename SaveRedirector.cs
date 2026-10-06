@@ -43,11 +43,18 @@ public class SaveRedirector
     /// <summary>True from a swap request until the new progression has finished loading.</summary>
     public bool IsSwapping => swapping;
 
+    /// <summary>If set, overrides <see cref="SaveDirectory"/>. The Linux launcher points it into each
+    /// instance's Wine prefix so parallel instances never share a save.</summary>
+    public const string SAVE_DIR_ENV_VAR = "RAINWORLD_RL_SAVE_DIR";
+
     /// <summary>Absolute directory the RL save file lives in.</summary>
     public string SaveDirectory
     {
         get
         {
+            string overrideDir = Environment.GetEnvironmentVariable(SAVE_DIR_ENV_VAR);
+            if (!string.IsNullOrEmpty(overrideDir))
+                return overrideDir;
             string name = string.IsNullOrEmpty(SaveName) ? "default" : SaveName;
             foreach (char c in Path.GetInvalidFileNameChars())
                 name = name.Replace(c, '_');

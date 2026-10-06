@@ -55,7 +55,9 @@ from __future__ import annotations
 
 import logging
 import mmap
+import os
 import struct
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -469,6 +471,35 @@ def open_mapping(name: str = SHARED_MEMORY_NAME, size: int = TOTAL_SIZE) -> mmap
     return mmap.mmap(-1, size, tagname = name)
 
 
+def default_shm_path(instance: int = 0) -> Optional[str]:
+    """
+    The /dev/shm file backing ``instance``'s mapping on Linux, or None on
+    Windows (named mapping, one instance). The uid and SLURM job id keep users
+    and jobs that share a node apart.
+    """
+    if sys.platform == "win32":
+        if instance != 0:
+            raise ValueError("Multiple game instances are only supported on Linux")
+        return None
+    job = os.environ.get("SLURM_JOB_ID")
+    tag = f"{os.getuid()}_{job}" if job else str(os.getuid())
+    return f"/dev/shm/rainworld_rl_{tag}_{instance}"
+
+
+def open_file_mapping(path: str, size: int = TOTAL_SIZE) -> mmap.mmap:
+    """
+    Open (or create) a file-backed mapping, the counterpart of the mod's
+    ``RAINWORLD_RL_SHM`` mode. Under Wine the game maps the same /dev/shm file.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.fstat(fd).st_size < size:
+            os.ftruncate(fd, size)
+        return mmap.mmap(fd, size)
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
@@ -500,6 +531,7 @@ class SharedMemoryClient:
         frame_height: int = 90,
         debug_timing: bool = False,
         mapping_factory: Optional[Callable[[], Any]] = None,
+        shm_path: Optional[str] = None,
     ):
         """
         Args:
@@ -509,7 +541,11 @@ class SharedMemoryClient:
             mapping_factory: Callable returning a mapping object (see module
                 docstring). Defaults to opening the real named mapping. Used
                 by unit tests to inject an in-memory fake.
+            shm_path: Use the file-backed mapping at this path instead of the
+                named mapping (Linux / Wine; see ``open_file_mapping``).
         """
+        if mapping_factory is None and shm_path is not None:
+            mapping_factory = lambda: open_file_mapping(shm_path)
         self._validate_dims(frame_width, frame_height)
         self.frame_width = frame_width
         self.frame_height = frame_height

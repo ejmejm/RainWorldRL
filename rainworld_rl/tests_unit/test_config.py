@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from rainworld_rl import config as cfg
 
 def test_defaults():
     c = cfg.Config()
-    assert c.game_dir == Path("Z:/SteamLibrary/steamapps/common/Rain World")
+    assert c.game_dir == cfg.DEFAULT_GAME_DIR
     assert c.exe_path == c.game_dir / "RainWorld.exe"
     assert c.plugins_dir == c.game_dir / "BepInEx" / "plugins"
     assert c.plugin_dll_path == c.plugins_dir / "RainWorldRL.dll"
@@ -52,6 +53,7 @@ def test_explicit_arg_beats_env_var(tmp_path, monkeypatch):
 def test_defaults_when_nothing_present(monkeypatch):
     monkeypatch.delenv(cfg.CONFIG_ENV_VAR, raising = False)
     monkeypatch.setattr(cfg, "REPO_ROOT", Path("Q:/definitely/not/here"))
+    monkeypatch.setattr(cfg, "USER_CONFIG_PATH", Path("Q:/definitely/not/here.toml"))
     assert cfg.load_config() == cfg.Config()
 
 
@@ -79,5 +81,16 @@ def test_example_toml_parses_and_matches_defaults():
     example = cfg.REPO_ROOT / "rainworld_rl.example.toml"
     assert example.is_file()
     c = cfg.load_config(example)
-    assert c.game_dir == cfg.Config().game_dir
+    if sys.platform == "win32":  # the example shows the Windows path
+        assert c.game_dir == cfg.Config().game_dir
     assert c.launch_timeout == cfg.Config().launch_timeout
+
+
+def test_renderer(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('renderer = "virtualgl"\n', encoding = "utf-8")
+    assert cfg.load_config(p).renderer == "virtualgl"
+    assert cfg.Config().renderer == "cpu"
+    p.write_text('renderer = "vulkan"\n', encoding = "utf-8")
+    with pytest.raises(cfg.ConfigError):
+        cfg.load_config(p)
