@@ -10,8 +10,7 @@ using UnityEngine;
 ///
 /// While the agent is in control (<see cref="SetAgentInControl"/>) the camera renders straight into a
 /// texture <see cref="RenderScale"/> x the frame size with the game's field of view, so far fewer
-/// pixels are shaded than at 1366x768, and with <see cref="SMALL_WINDOW_ENV_VAR"/> set the window
-/// shrinks to the frame size so compositing and presenting it is cheap too.
+/// pixels are shaded than at 1366x768.
 /// Uses lazy initialization to avoid creating textures before Unity is ready.
 /// </summary>
 public class FrameCapture : IDisposable
@@ -20,9 +19,6 @@ public class FrameCapture : IDisposable
     private Texture2D captureTexture;
     private RenderTexture screenCapture;  // Full-size GPU copy of the back buffer (camera without a target texture)
     private RenderTexture smallTarget;    // The camera's render target while the agent is in control
-    private int savedWindowWidth;         // Window size before shrinking it; 0 while not shrunk
-    private int savedWindowHeight;
-    private FullScreenMode savedWindowMode;
     private int width;
     private int height;
     private int lastScreenWidth;
@@ -34,16 +30,9 @@ public class FrameCapture : IDisposable
     public int Height => height;
     public int FrameSize => width * height * 3;
 
-    /// <summary>If set (the Linux launcher sets it), the window shrinks to the frame size while the agent
-    /// is in control. Nothing reads the window then, and under software rendering compositing and presenting
-    /// a full-size window costs several ms per step.</summary>
-    public const string SMALL_WINDOW_ENV_VAR = "RAINWORLD_RL_SMALL_WINDOW";
-
     /// <summary>The camera renders into a texture this many times the frame size while the agent is in
     /// control; the capture averages it down. 0 keeps the game's own full-size target.</summary>
     public int RenderScale { get; set; } = 2;
-
-    private readonly bool shrinkWindow = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(SMALL_WINDOW_ENV_VAR));
 
     /// <summary>
     /// Initializes the frame capture system with the specified dimensions.
@@ -116,9 +105,8 @@ public class FrameCapture : IDisposable
     }
 
     /// <summary>
-    /// Called every frame. While the agent is in control the Futile camera renders into the small target
-    /// (and the window shrinks, see <see cref="SMALL_WINDOW_ENV_VAR"/>); otherwise the game's own target and
-    /// window size are restored. Cheap when nothing changes.
+    /// Called every frame. While the agent is in control the Futile camera renders into the small target;
+    /// otherwise the game's own target is restored. Cheap when nothing changes.
     /// </summary>
     public void SetAgentInControl(bool agent)
     {
@@ -144,19 +132,6 @@ public class FrameCapture : IDisposable
                 cam.targetTexture = smallTarget;
                 cam.aspect = (float)Futile.screen.pixelWidth / Futile.screen.pixelHeight;  // 1366x768 is not exactly 16:9
             }
-        }
-
-        if (agent && shrinkWindow && savedWindowWidth == 0)
-        {
-            savedWindowWidth = Screen.width;
-            savedWindowHeight = Screen.height;
-            savedWindowMode = Screen.fullScreenMode;
-            Screen.SetResolution(width, height, FullScreenMode.Windowed);
-        }
-        else if (!agent && savedWindowWidth != 0)
-        {
-            Screen.SetResolution(savedWindowWidth, savedWindowHeight, savedWindowMode);
-            savedWindowWidth = 0;
         }
     }
 

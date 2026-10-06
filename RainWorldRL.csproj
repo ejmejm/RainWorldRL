@@ -50,6 +50,9 @@
     <Reference Include="MonoMod.RuntimeDetour">
       <HintPath>$(BepInExCore)/MonoMod.RuntimeDetour.dll</HintPath>
     </Reference>
+    <Reference Include="Mono.Cecil">
+      <HintPath>$(BepInExCore)/Mono.Cecil.dll</HintPath>
+    </Reference>
     <Reference Include="MonoMod.Utils">
       <HintPath>$(BepInExCore)/MonoMod.Utils.dll</HintPath>
     </Reference>
