@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import logging
 import os
+import platform
 import shutil
 import signal
 import subprocess
@@ -456,6 +457,10 @@ def _start_game_linux(config: Config, instance: int) -> subprocess.Popen:
     # audit backlog then freezes the game for 10-60 s. Costs a 2 GB initial heap.
     env.setdefault("GC_INITIAL_HEAP_SIZE", str(2 * 1024 ** 3))
     env.setdefault("GC_FREE_SPACE_DIVISOR", "1")
+    # Have the mod keep one core spinning while the agent plays: keeps clocks up so the per-step hand-offs
+    # between the game's threads stay fast (Vulcan: ~1.75x). On WSL2 the host manages clocks and it costs ~10%.
+    if "microsoft" not in platform.release().lower():
+        env.setdefault("RAINWORLD_RL_CORE_WARMER", "1")
     cmd = _in_container(config, ["bash", "-c", _RUN_ON_XVFB, "run-on-xvfb", *wrapper, "wine", str(config.exe_path)])
     cpus = _game_cpus(instance)
     if cpus and shutil.which("taskset"):
