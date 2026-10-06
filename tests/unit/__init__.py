@@ -1,1 +1,1 @@
-"""Unit tests for the harness itself; they never need the game."""
+"""Game-free unit tests; they never need the game."""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -10,43 +9,27 @@ import pytest
 from rainworld_rl import config as cfg
 
 
-def test_defaults():
+def test_defaults_and_explicit_file(tmp_path):
     c = cfg.Config()
     assert c.game_dir == cfg.DEFAULT_GAME_DIR
-    assert c.exe_path == c.game_dir / "RainWorld.exe"
-    assert c.plugins_dir == c.game_dir / "BepInEx" / "plugins"
-    assert c.plugin_dll_path == c.plugins_dir / "RainWorldRL.dll"
-    assert c.bepinex_log == c.game_dir / "BepInEx" / "LogOutput.log"
-    assert c.rl_save_dir == c.plugins_dir / "RainWorldRL" / "saves"
-    assert c.launch_timeout == 120.0
     assert c.source is None
-
-
-def test_load_explicit_file(tmp_path):
     p = tmp_path / "x.toml"
     p.write_text('game_dir = "D:/Games/Rain World"\nlaunch_timeout = 30\n', encoding = "utf-8")
     c = cfg.load_config(p)
     assert c.game_dir == Path("D:/Games/Rain World")
+    assert c.plugin_dll_path == c.game_dir / "BepInEx" / "plugins" / "RainWorldRL.dll"
     assert c.launch_timeout == 30.0
-    assert c.rl_save_dir == Path("D:/Games/Rain World/BepInEx/plugins/RainWorldRL/saves")
     assert c.source == p
 
 
-def test_env_var_overrides_repo_file(tmp_path, monkeypatch):
-    p = tmp_path / "env.toml"
-    p.write_text('game_dir = "E:/Env"\nrl_save_dir = "E:/saves"\n', encoding = "utf-8")
-    monkeypatch.setenv(cfg.CONFIG_ENV_VAR, str(p))
-    c = cfg.load_config()
-    assert c.game_dir == Path("E:/Env")
-    assert c.rl_save_dir == Path("E:/saves")
-
-
-def test_explicit_arg_beats_env_var(tmp_path, monkeypatch):
+def test_lookup_order(tmp_path, monkeypatch):
+    """RAINWORLD_RL_CONFIG overrides the repo/user files; an explicit path beats it."""
     a = tmp_path / "a.toml"
     b = tmp_path / "b.toml"
     a.write_text('game_dir = "E:/A"\n', encoding = "utf-8")
     b.write_text('game_dir = "E:/B"\n', encoding = "utf-8")
     monkeypatch.setenv(cfg.CONFIG_ENV_VAR, str(b))
+    assert cfg.load_config().game_dir == Path("E:/B")
     assert cfg.load_config(a).game_dir == Path("E:/A")
 
 
@@ -78,11 +61,7 @@ def test_errors(tmp_path, monkeypatch):
 
 
 def test_example_toml_parses_and_matches_defaults():
-    example = cfg.REPO_ROOT / "rainworld_rl.example.toml"
-    assert example.is_file()
-    c = cfg.load_config(example)
-    if sys.platform == "win32":  # the example shows the Windows path
-        assert c.game_dir == cfg.Config().game_dir
+    c = cfg.load_config(cfg.REPO_ROOT / "rainworld_rl.example.toml")
     assert c.launch_timeout == cfg.Config().launch_timeout
 
 

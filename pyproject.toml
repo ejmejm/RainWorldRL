@@ -27,3 +27,9 @@ version = {attr = "rainworld_rl.__version__"}
 
 [tool.setuptools.package-data]
 rainworld_rl = ["mod/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra -p no:cacheprovider"
+markers = ["e2e: drives the real game (skipped unless --e2e)"]

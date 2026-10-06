@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tests.harness import DOWN, LEFT, NOOP, RIGHT
+from rainworld_rl import KEY_DOWN, KEY_LEFT, KEY_RIGHT
+from rainworld_rl.rewards import DriveReward
 
 # Steps (1 tick each) bound from ENTER_SHELTER to READY in the next cycle: the shelter loads and the slugcat
 # crosses the entrance pipe (~20 ticks), walks in (WALK_STEPS), stands still 20 ticks or holds DOWN 260 ticks
@@ -19,17 +20,17 @@ def _sleep_in_shelter(renv, food, rest):
     ENTER_SHELTER with ``food`` pips, wait until the slugcat pops out of the shelter's entrance pipe, walk on for
     WALK_STEPS, then hold ``rest`` until READY has dropped for the cycle reload and come back. Returns the infos.
     """
-    pos = renv.step(NOOP)[4]["player_pos"]
+    pos = renv.step(0)[4]["player_pos"]
     renv.unwrapped.debug_enter_shelter(food)
-    infos, out, walk, reloading = [], None, NOOP, False
+    infos, out, walk, reloading = [], None, 0, False
     for i in range(MAX_STEPS):
-        action = NOOP if out is None or i <= out + 1 else walk if i <= out + 1 + WALK_STEPS else rest
+        action = 0 if out is None or i <= out + 1 else walk if i <= out + 1 + WALK_STEPS else rest
         info = renv.step(action)[4]
         infos.append(info)
         if out is None and info["in_shelter"] and info["player_pos"] != pos:     # frozen while in the pipe
             out = i
         elif out is not None and i == out + 1:
-            walk = LEFT if info["player_pos"][0] < infos[-2]["player_pos"][0] else RIGHT
+            walk = KEY_LEFT if info["player_pos"][0] < infos[-2]["player_pos"][0] else KEY_RIGHT
         reloading |= not info["ready"]
         if reloading and info["ready"]:
             return infos
@@ -42,12 +43,10 @@ def test_fed_sleep_reports_cycle_survived_once(env):
     malnourished = false): exactly one step reports cycle_survived, the Sleep term pays on it, and the next cycle
     starts in the shelter with cycle_number + 1 and karma + 1 (up to the cap).
     """
-    from rainworld_rl.rewards import DriveReward
-
     renv = DriveReward(env)
     _obs, start = renv.reset()                     # fresh save: cycle 0, no food, outside any shelter
-    infos = _sleep_in_shelter(renv, start["food_to_hibernate"], NOOP)
-    infos += [renv.step(NOOP)[4] for _ in range(30)]
+    infos = _sleep_in_shelter(renv, start["food_to_hibernate"], 0)
+    infos += [renv.step(0)[4] for _ in range(30)]
 
     edges = [i for i, info in enumerate(infos) if info["cycle_survived"]]
     assert len(edges) == 1, f"cycle_survived on steps {edges}"
@@ -68,11 +67,9 @@ def test_starving_sleep_is_not_cycle_survived(env):
     (RainWorldGame.Win with malnourished = true): no cycle_survived and no Sleep reward, but the next cycle starts in
     the shelter with cycle_number + 1, malnourished and food_to_hibernate == food_max.
     """
-    from rainworld_rl.rewards import DriveReward
-
     renv = DriveReward(env)
     _obs, start = renv.reset()
-    infos = _sleep_in_shelter(renv, 1, DOWN)
+    infos = _sleep_in_shelter(renv, 1, KEY_DOWN)
 
     assert not any(info["cycle_survived"] for info in infos)
     assert all(info["reward_terms"]["Sleep"] == 0 for info in infos)

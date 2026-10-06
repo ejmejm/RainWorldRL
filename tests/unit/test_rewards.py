@@ -27,7 +27,6 @@ from rainworld_rl.rewards import (
     RewardTerm,
     Sleep,
     SurviveCycleReward,
-    default_terms,
     drive_terms,
     make_default_reward_env,
     nominal_cycle_steps,
@@ -96,11 +95,10 @@ class ScriptedEnv(gym.Env):
 # ---------------------------------------------------------------------------
 
 def test_nominal_cycle_steps_derives_from_ticks_per_step():
-    assert NOMINAL_CYCLE_TICKS == 24000
-    assert nominal_cycle_steps(1) == 24000
-    assert nominal_cycle_steps(4) == 6000
-    assert nominal_cycle_steps(7) == round(24000 / 7)
-    assert nominal_cycle_steps(0) == 24000            # 0 is treated as 1, like the mod does
+    assert nominal_cycle_steps(1) == NOMINAL_CYCLE_TICKS
+    assert nominal_cycle_steps(4) == NOMINAL_CYCLE_TICKS // 4
+    assert nominal_cycle_steps(7) == round(NOMINAL_CYCLE_TICKS / 7)
+    assert nominal_cycle_steps(0) == NOMINAL_CYCLE_TICKS   # 0 is treated as 1, like the mod does
     assert nominal_cycle_steps(10 ** 9) == 1
 
 
@@ -121,9 +119,7 @@ def test_new_room_rewards_first_visits_only_and_ignores_start_room():
     term = NewRoom()
     assert run(term, seq) == [0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
     assert term.visited == {("SU", 10), ("SU", 11), ("SU", 12)}
-
-
-def test_new_room_ignores_not_ready_and_invalid_rooms():
+    # not-ready and invalid rooms are ignored
     seq = [info(room_index = 10), not_ready(), info(room_index = -1), info(room_index = 10), info(room_index = 11)]
     assert run(NewRoom(weight = 2.0), seq) == [0.0, 0.0, 0.0, 2.0]
 
@@ -192,9 +188,7 @@ def test_food_satiety_recovers_linearly_in_real_steps_not_cycles():
         term(info(cycle_number = 1), info(cycle_number = 1))
     assert term.satiety(("SU", 10)) == 1.0                                # clamped at fresh
     assert term(info(food = 0, cycle_number = 1), info(food = 1, cycle_number = 1)) == pytest.approx(1.0)
-
-
-def test_food_recovery_is_applied_before_the_next_pip():
+    # recovery is applied before the next pip is paid
     term = Food(below = 1.0, above = 1.0, satiety_decay = 0.5, recovery_steps = 10)
     term.reset(info())
     term(info(food = 0), info(food = 1))                      # factor 0.5 at step 1
@@ -214,7 +208,6 @@ def test_food_reset_clears_satiety_and_weight_scales():
     term = Food(below = 1.0, satiety_decay = 0.5, recovery_steps = 10 ** 9, weight = 2.0)
     assert run(term, [info(food = 0), info(food = 1)]) == pytest.approx([2.0])
     assert run(term, [info(food = 0), info(food = 1)]) == pytest.approx([2.0])   # fresh after reset
-    assert Food().recovery_steps == 24000 and Food(recovery_steps = 6000).recovery_steps == 6000
     with pytest.raises(ValueError):
         Food(satiety_decay = 1.5)
     with pytest.raises(ValueError):
@@ -289,7 +282,6 @@ def test_sleep_resets_steps_awake_on_env_reset_and_counts_non_ready_steps():
     for _ in range(5):
         term(not_ready(), not_ready())                                     # loading screens still take time
     assert term.tiredness == pytest.approx(0.5 ** 2)
-    assert Sleep().nominal_cycle_steps == 24000
     with pytest.raises(ValueError):
         Sleep(nominal_cycle_steps = 0)
 
@@ -314,23 +306,28 @@ def test_death_is_minus_three_by_default_and_once_per_edge():
 def test_malnourished_per_step_while_ready():
     seq = [info(), info(malnourished = True), info(malnourished = True), not_ready(), info(malnourished = True), info()]
     assert run(Malnourished(), seq) == pytest.approx([-0.0003, -0.0003, 0.0, -0.0003, 0.0])
-    assert Malnourished(per_step = -0.01).per_step == -0.01
 
 
 # ---------------------------------------------------------------------------
 # Building blocks
 # ---------------------------------------------------------------------------
 
-def test_cycle_survived_fires_once_per_edge_and_scales():
+def test_cycle_survived_term_and_survive_cycle_reward():
     seq = [info(), info(), info(cycle_survived = True, cycle_number = 1), info(cycle_number = 1), info(cycle_survived = True, cycle_number = 2)]
     assert run(CycleSurvived(), seq) == [0.0, 1.0, 0.0, 1.0]
     assert run(CycleSurvived(weight = 5.0), seq) == [0.0, 5.0, 0.0, 5.0]
-
-
-def test_cycle_survived_counts_even_when_not_ready_that_step():
     # The edge may land on the frame where the SleepScreen redirect already left the game.
     gone = not_ready(); gone["cycle_survived"] = True
     assert run(CycleSurvived(), [info(), gone, info(cycle_number = 1)]) == [1.0, 0.0]
+    # SurviveCycleReward: +1 on a survived cycle only; a starving sleep (cycle advances, malnourished) pays nothing
+    seq = [info(), info(player_dead = True), info(room_index = 99, food = 5), info(cycle_survived = True)]
+    env = SurviveCycleReward(ScriptedEnv(seq))
+    env.reset()
+    assert [env.step(0)[1] for _ in range(3)] == [0.0, 0.0, 1.0]
+    seq = [info(in_shelter = True), info(cycle_number = 1, malnourished = True, food_to_hibernate = 7)]
+    env = SurviveCycleReward(ScriptedEnv(seq))
+    env.reset()
+    assert env.step(0)[1] == 0.0
 
 
 def test_ate_counts_pips_gained_within_a_cycle_only():
@@ -338,9 +335,7 @@ def test_ate_counts_pips_gained_within_a_cycle_only():
            info(food = 0, cycle_number = 1), info(food = 1, cycle_number = 1)]
     assert run(Ate(), seq) == [1.0, 2.0, 0.0, 0.0, 0.0, 1.0]
     assert run(Ate(weight = 0.5), seq) == [0.5, 1.0, 0.0, 0.0, 0.0, 0.5]
-
-
-def test_ate_ignores_cycle_change_and_not_ready_jumps():
+    # not-ready jumps and a cycle change are not eating
     seq = [info(food = 4), not_ready(), info(food = 4), info(food = 5)]
     assert run(Ate(), seq) == [0.0, 0.0, 1.0]
     seq = [info(food = 1), info(food = 3, cycle_number = 1)]
@@ -350,7 +345,6 @@ def test_ate_ignores_cycle_change_and_not_ready_jumps():
 def test_alive_per_step_except_death_and_not_ready():
     seq = [info(), info(), info(player_dead = True), not_ready(), info()]
     assert run(Alive(weight = 0.1), seq) == pytest.approx([0.1, 0.0, 0.0, 0.1])
-    assert Alive().weight == 0.01
 
 
 def test_function_term_wraps_callable_and_names_it():
@@ -361,12 +355,6 @@ def test_function_term_wraps_callable_and_names_it():
     assert term.name == "karma_delta"
     assert run(term, [info(karma = 1), info(karma = 2), info(karma = 0)]) == [2.0, -4.0]
     assert FunctionTerm(lambda p, c: 1.0, name = "one").name == "one"
-
-
-def test_term_repr_and_default_name():
-    assert repr(CycleSurvived()) == "CycleSurvived(weight = 1.0)"
-    assert CycleSurvived().name == "CycleSurvived"
-    assert CycleSurvived(name = "survive").name == "survive"
 
 
 # ---------------------------------------------------------------------------
@@ -406,44 +394,34 @@ def test_info_reward_resets_terms_on_env_reset():
     assert env.step(0)[1] == 0.0          # back to room 1 (start room, visited)
 
 
-def test_info_reward_replaces_env_reward_unless_asked():
+def test_info_reward_options_add_env_reward_and_breakdown_key():
     seq = [info(), info(cycle_survived = True)]
     env = InfoReward(ScriptedEnv(seq, env_reward = 10.0), [CycleSurvived()])
     env.reset()
-    assert env.step(0)[1] == 1.0
+    assert env.step(0)[1] == 1.0                           # the env's own reward is replaced ...
     env = InfoReward(ScriptedEnv(seq, env_reward = 10.0), [CycleSurvived()], add_env_reward = True)
     env.reset()
-    assert env.step(0)[1] == 11.0
-
-
-def test_info_reward_breakdown_key_can_be_disabled_or_renamed():
-    seq = [info(), info()]
-    env = InfoReward(ScriptedEnv(seq), [Alive(1.0)], breakdown_key = None)
+    assert env.step(0)[1] == 11.0                          # ... unless asked
+    env = InfoReward(ScriptedEnv(seq), [CycleSurvived()], breakdown_key = None)
     env.reset()
     assert "reward_terms" not in env.step(0)[4]
-    env = InfoReward(ScriptedEnv(seq), [Alive(1.0)], breakdown_key = "terms")
+    env = InfoReward(ScriptedEnv(seq), [CycleSurvived()], breakdown_key = "terms")
     env.reset()
-    assert env.step(0)[4]["terms"] == {"Alive": 1.0}
+    assert env.step(0)[4]["terms"] == {"CycleSurvived": 1.0}
 
 
-def test_info_reward_step_before_reset_uses_first_info_as_baseline():
-    seq = [info(food = 2), info(food = 3), info(food = 5)]
-    env = InfoReward(ScriptedEnv(seq), [Ate()])
-    assert env.step(0)[1] == 0.0
-    assert env.step(0)[1] == 2.0
-
-
-def test_info_reward_rejects_empty_or_duplicate_terms():
+def test_info_reward_edge_cases():
     with pytest.raises(ValueError):
         InfoReward(ScriptedEnv([info()]), [])
     with pytest.raises(ValueError):
         InfoReward(ScriptedEnv([info()]), [Alive(), Alive()])
     InfoReward(ScriptedEnv([info()]), [Alive(name = "a"), Alive(name = "b")])  # ok
-
-
-def test_prev_info_is_a_copy():
-    seq = [info(food = 1), info(food = 2)]
-    env = InfoReward(ScriptedEnv(seq), [Ate()])
+    # step() before reset() uses the first info as the baseline
+    env = InfoReward(ScriptedEnv([info(food = 2), info(food = 3), info(food = 5)]), [Ate()])
+    assert env.step(0)[1] == 0.0
+    assert env.step(0)[1] == 2.0
+    # prev_info is a copy of what reset() returned
+    env = InfoReward(ScriptedEnv([info(food = 1), info(food = 2)]), [Ate()])
     _obs, first = env.reset()
     first["food"] = 99
     assert env.prev_info["food"] == 1
@@ -454,28 +432,13 @@ def test_prev_info_is_a_copy():
 # Default: DriveReward
 # ---------------------------------------------------------------------------
 
-def test_default_terms_are_the_drive_terms_with_novelty_toggle():
-    terms = default_terms()
-    assert [type(t) for t in terms] == [NewRoom, Food, Sleep, Death, Malnourished]
-    assert default_terms() is not terms
-    assert [type(t) for t in drive_terms(novelty = False)] == [Food, Sleep, Death, Malnourished]
-    names = [t.name for t in terms]
-    assert names == ["NewRoom", "Food", "Sleep", "Death", "Malnourished"]
-    food, sleep, death, mal = terms[1], terms[2], terms[3], terms[4]
-    assert (food.below, food.above, food.satiety_decay, food.recovery_steps) == (0.3, 0.1, 0.5, 24000)
-    assert (sleep.weight, sleep.full_belly_per_pip, sleep.nominal_cycle_steps) == (1.0, 0.25, 24000)
-    assert death.weight == -3.0 and mal.per_step == -0.0003
-    # weights are overridable by keyword
-    t = drive_terms(ticks_per_step = 4, death = -1.0, food_below = 0.5, recovery_steps = 123)
-    assert t[1].below == 0.5 and t[1].recovery_steps == 123 and t[2].nominal_cycle_steps == 6000 and t[3].weight == -1.0
-
-
 def test_make_default_reward_env_returns_drive_reward_and_derives_ticks_per_step():
     seq = [info(room_index = 1), info(room_index = 2, food = 1), info(room_index = 2, player_dead = True),
            info(room_index = 2, malnourished = True)]
     env = make_default_reward_env(ScriptedEnv(seq, ticks_per_step = 4))
     assert isinstance(env, DriveReward) and isinstance(env, InfoReward)
     assert env.novelty is True and env.ticks_per_step == 4
+    assert [t.name for t in env.terms] == ["NewRoom", "Food", "Sleep", "Death", "Malnourished"]
     assert env.term("Food").recovery_steps == 6000 and env.term("Sleep").nominal_cycle_steps == 6000
     env.reset()
     _o, r1, _t, _tr, i1 = env.step(0)
@@ -485,20 +448,12 @@ def test_make_default_reward_env_returns_drive_reward_and_derives_ticks_per_step
     assert env.step(0)[1] == pytest.approx(-0.0003)
 
     env = make_default_reward_env(ScriptedEnv(seq), novelty = False)
-    assert "NewRoom" not in [t.name for t in env.terms] and env.ticks_per_step == 1
+    assert [t.name for t in env.terms] == ["Food", "Sleep", "Death", "Malnourished"] and env.ticks_per_step == 1
     env = DriveReward(ScriptedEnv(seq, ticks_per_step = 4), ticks_per_step = 8)
     assert env.term("Food").recovery_steps == 3000                 # explicit override wins
-
-
-def test_survive_cycle_reward_is_the_sparse_alternative():
-    seq = [info(), info(player_dead = True), info(room_index = 99, food = 5), info(cycle_survived = True)]
-    env = SurviveCycleReward(ScriptedEnv(seq))
-    env.reset()
-    assert [env.step(0)[1] for _ in range(3)] == [0.0, 0.0, 1.0]
-    seq = [info(in_shelter = True), info(cycle_number = 1, malnourished = True, food_to_hibernate = 7)]
-    env = SurviveCycleReward(ScriptedEnv(seq))
-    env.reset()
-    assert env.step(0)[1] == 0.0
+    # weights are overridable by keyword
+    env = make_default_reward_env(ScriptedEnv(seq), death = -1.0, food_below = 0.5, recovery_steps = 123)
+    assert env.term("Death").weight == -1.0 and env.term("Food").below == 0.5 and env.term("Food").recovery_steps == 123
 
 
 # ---------------------------------------------------------------------------

@@ -11,10 +11,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.harness import LEFT, NOOP, RIGHT, step_n
+from rainworld_rl import KEY_LEFT, KEY_RIGHT
+
+from tests.e2e.helpers import step_n
 
 TICKS = 10  # enough movement per step to show up in a 160x90 frame
-CYCLE = [NOOP, NOOP, NOOP, RIGHT, NOOP, NOOP, NOOP, LEFT]  # each move followed by still steps
+CYCLE = [0, 0, 0, KEY_RIGHT, 0, 0, 0, KEY_LEFT]  # each move followed by still steps
 STEPS = 64
 
 

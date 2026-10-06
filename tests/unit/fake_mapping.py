@@ -48,7 +48,6 @@ class FakeMapping(bytearray):
         self.mod_fields = dict(
             karma = 3, karma_cap = 5, food = 2, player_x = 123.5, player_y = -4.25,
             room_index = 42, cycle_number = 1,
-            # protocol v3 game-state fields
             food_max = 7, food_to_hibernate = 4, malnourished = 0, cycle_progress = 0.0,
             game_flags = 0,                      # level bits (GAME_FLAG_IN_SHELTER, ...)
             region = "SU",                       # region acronym, NUL-padded on the wire
@@ -96,7 +95,7 @@ class FakeMapping(bytearray):
 
     def service_step(self) -> None:
         h = self.header()
-        # Like the mod: read the raw-key bitfield at offset 44 (the legacy byte at offset 1 is ignored).
+        # Like the mod: read the raw-key bitfield at offset 44 (offset 1 is reserved).
         self.steps_serviced.append((h.action_bits, h.ticks_per_step))
         self.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_PROCESSING,)))
         w, hgt = h.frame_width, h.frame_height

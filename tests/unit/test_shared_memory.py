@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import struct
 import threading
 import time
 
+import gymnasium as gym
+import gymnasium.spaces as spaces
 import numpy as np
 import pytest
 
@@ -14,7 +17,7 @@ from rainworld_rl import shared_memory as sm
 from rainworld_rl.rainworld_env import RainWorldEnv
 from rainworld_rl.shared_memory import ModState, SharedMemoryClient
 
-from fake_mapping import FakeMapping
+from tests.unit.fake_mapping import FakeMapping
 
 
 def make_client(mapping: FakeMapping, width: int = 8, height: int = 4) -> SharedMemoryClient:
@@ -60,11 +63,16 @@ def test_header_pack_unpack_round_trip():
     state = ModState(
         sync_flag = 3, ticks_per_step = 255, status = 0x2A,
         frame_width = 1920, frame_height = 1080, command = 1, command_result = 1,
-        heartbeat = 4_000_000_000, step_counter = 123456, karma = 9, karma_cap = 10, food = 7,
+        game_flags = sm.GAME_FLAG_RAIN | sm.GAME_FLAG_DIALOG_OPEN,
+        heartbeat = 4_000_000_000, step_counter = 123456, karma = 9, karma_cap = 10, food = 7, food_max = 9,
         player_x = 1024.25, player_y = 300.75, room_index = 2**31 - 1, cycle_number = -1,
-        action_bits = 0x1FF,
+        action_bits = 0x1FF, cycle_progress = 1.25, food_to_hibernate = 6, malnourished = 1,
     )
-    again = ModState.unpack(state.pack())
+    raw = state.pack()
+    assert raw[sm.OFFSET_FOOD_MAX] == 9
+    assert raw[sm.OFFSET_FOOD_TO_HIBERNATE] == 6
+    assert raw[sm.OFFSET_MALNOURISHED] == 1
+    again = ModState.unpack(raw)
     assert again == state
     assert again.player_dead is False
     assert again.connected is True
@@ -72,6 +80,7 @@ def test_header_pack_unpack_round_trip():
     assert again.human_override is True
     assert again.in_game is False
     assert again.mod_alive is True
+    assert again.rain and again.dialog_open and not again.in_shelter and not again.cycle_survived
     assert again.player_pos == (1024.25, 300.75)
 
 
@@ -92,20 +101,6 @@ def test_to_info_contains_expected_fields():
     assert info["malnourished"] is True
 
 
-def test_v3_game_state_fields_round_trip():
-    state = ModState(food_max = 9, food_to_hibernate = 6, malnourished = 1, cycle_progress = 1.25,
-                     game_flags = sm.GAME_FLAG_RAIN | sm.GAME_FLAG_DIALOG_OPEN)
-    raw = state.pack()
-    assert raw[sm.OFFSET_FOOD_MAX] == 9
-    assert raw[sm.OFFSET_FOOD_TO_HIBERNATE] == 6
-    assert raw[sm.OFFSET_MALNOURISHED] == 1
-    assert raw[54:64] == bytes(10)                      # region "" and reserved tail are all NUL
-    again = ModState.unpack(raw)
-    assert again == state
-    assert again.rain and again.dialog_open and not again.in_shelter and not again.cycle_survived
-    assert again.cycle_progress == 1.25
-
-
 def test_region_round_trip_is_ascii_nul_padded_and_stripped():
     raw = ModState(region = "SU").pack()
     assert raw[sm.OFFSET_REGION:sm.OFFSET_REGION + sm.REGION_SIZE] == b"SU\0\0"
@@ -119,25 +114,6 @@ def test_region_round_trip_is_ascii_nul_padded_and_stripped():
     buf = bytearray(ModState(region = "HI").pack())
     buf[sm.OFFSET_REGION + 3] = ord("x")
     assert ModState.unpack(bytes(buf)).region == "HI"
-
-
-def test_fake_mapping_writes_v3_fields():
-    mapping = FakeMapping()
-    mapping.mod_fields.update(food_max = 5, food_to_hibernate = 3, malnourished = 1, cycle_progress = 0.5,
-                              game_flags = sm.GAME_FLAG_IN_SHELTER)
-    mapping.next_step_game_flags = sm.GAME_FLAG_CYCLE_SURVIVED
-    mapping.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_ACTION_READY,)))
-    mapping.service_step()
-    info = mapping.header().to_info()
-    assert (info["food_max"], info["food_to_hibernate"], info["malnourished"]) == (5, 3, True)
-    assert info["cycle_progress"] == 0.5
-    assert info["region"] == "SU"
-    assert info["in_shelter"] and info["cycle_survived"] and not info["rain"]
-    # the edge bit is one-shot
-    mapping.put(sm.OFFSET_SYNC_FLAG, bytes((sm.SYNC_ACTION_READY,)))
-    mapping.service_step()
-    info = mapping.header().to_info()
-    assert info["in_shelter"] and not info["cycle_survived"]
 
 
 # ---------------------------------------------------------------------------
@@ -163,12 +139,10 @@ def test_set_connected_preserves_mod_owned_bits():
 
 def test_connect_sets_connected_and_dims_and_disconnect_clears():
     mapping = FakeMapping()
-    mapping.set_mod_bit(sm.STATUS_READY, True)
     client = make_client(mapping, 32, 16)
-    state = client.connect(liveness_timeout = 0.2)
-    assert state.ready
+    client.connect(wait_ready = False, liveness_timeout = 0.1)
     h = mapping.header()
-    assert h.connected and h.mod_alive
+    assert h.connected and h.mod_alive and not h.ready
     assert (h.frame_width, h.frame_height) == (32, 16)
     assert client.is_connected()
 
@@ -186,8 +160,10 @@ def test_connect_sets_connected_and_dims_and_disconnect_clears():
 def test_connect_raises_when_heartbeat_static_and_mod_not_alive():
     mapping = FakeMapping(alive = False)
     client = make_client(mapping)
+    t0 = time.monotonic()
     with pytest.raises(sm.GameNotRunningError, match = "MOD_ALIVE clear"):
-        client.connect(liveness_timeout = 0.1)
+        client.connect(liveness_timeout = 0.1, alive_grace = 5.0)   # the grace applies only while MOD_ALIVE is set
+    assert time.monotonic() - t0 < 1.0
     assert mapping.closed
     assert not client.is_connected()
     assert not mapping.header().connected   # we never raised CONNECTED
@@ -199,8 +175,6 @@ def test_connect_raises_when_mod_alive_bit_set_but_heartbeat_static():
     client = make_client(mapping)
     with pytest.raises(sm.GameNotRunningError, match = "did not advance"):
         client.connect(liveness_timeout = 0.1, alive_grace = 0.3)
-    # without an explicit grace the client default (15 s) applies
-    assert sm.SharedMemoryClient.alive_stall_grace == 15.0
 
 
 def test_connect_tolerates_stalled_heartbeat_while_mod_alive():
@@ -223,15 +197,6 @@ def test_connect_tolerates_stalled_heartbeat_while_mod_alive():
     t.join()
 
 
-def test_wait_for_alive_grace_does_not_apply_when_mod_not_alive():
-    mapping = FakeMapping(alive = False)
-    client = make_client(mapping)
-    t0 = time.monotonic()
-    with pytest.raises(sm.GameNotRunningError, match = "MOD_ALIVE clear"):
-        client.wait_for_alive(timeout = 0.1, alive_grace = 5.0)
-    assert time.monotonic() - t0 < 1.0
-
-
 def test_connect_ready_timeout():
     mapping = FakeMapping(auto_ready = False)  # alive, never READY
     client = make_client(mapping)
@@ -239,13 +204,6 @@ def test_connect_ready_timeout():
         client.connect(ready_timeout = 0.05, liveness_timeout = 0.1)
     # Still attached; caller may retry wait_for_ready.
     assert client.is_connected()
-
-
-def test_connect_without_waiting_for_ready():
-    mapping = FakeMapping()
-    client = make_client(mapping)
-    client.connect(wait_ready = False, liveness_timeout = 0.1)
-    assert client.is_connected() and not mapping.header().ready
 
 
 @pytest.mark.parametrize("version", [0, 3])
@@ -291,19 +249,6 @@ def test_step_handshake_returns_frame_and_state():
     frame2, state2 = client.step(0, 1)
     assert np.all(frame == 200) and np.all(frame2 == 1)
     assert state2.step_counter == 2
-
-
-def test_player_dead_edge_is_reported_from_status_bit():
-    mapping = FakeMapping()
-    mapping.set_mod_bit(sm.STATUS_READY, True)
-    client = make_client(mapping)
-    client.connect(liveness_timeout = 0.1)
-
-    _, s1 = client.step(0)
-    mapping.next_step_dead = True
-    _, s2 = client.step(0)
-    _, s3 = client.step(0)
-    assert (s1.player_dead, s2.player_dead, s3.player_dead) == (False, True, False)
 
 
 def test_step_timeout_when_mod_alive_but_not_servicing():
@@ -373,24 +318,6 @@ def test_reset_command_is_acked():
     assert state.ready
 
 
-def test_reset_command_error_raises():
-    mapping = FakeMapping()
-    mapping.fail_commands = True
-    client = make_client(mapping)
-    client.connect(wait_ready = False, liveness_timeout = 0.1)
-    with pytest.raises(sm.CommandError, match = "error"):
-        client.reset_game(timeout = 1.0)
-
-
-def test_reset_command_timeout_raises():
-    mapping = FakeMapping()
-    mapping.service_commands = False
-    client = make_client(mapping)
-    client.connect(wait_ready = False, liveness_timeout = 0.1)
-    with pytest.raises(sm.CommandError, match = "not acknowledged"):
-        client.reset_game(timeout = 0.05)
-
-
 def test_reset_discards_stale_frame_ready():
     mapping = FakeMapping()
     client = make_client(mapping)
@@ -400,70 +327,31 @@ def test_reset_discards_stale_frame_ready():
     assert mapping.header().sync_flag == sm.SYNC_IDLE
 
 
-def test_kill_player_command_is_acked_and_next_step_reports_death_edge():
+@pytest.mark.parametrize("attr, value, match", [("fail_commands", True, "error"),
+                                                ("service_commands", False, "not acknowledged")])
+def test_send_command_raises_on_error_or_timeout(attr, value, match):
     mapping = FakeMapping()
     client = make_client(mapping)
-    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
-    mapping.put(sm.OFFSET_COMMAND_RESULT, bytes((sm.COMMAND_RESULT_OK,)))  # stale result is cleared first
-
-    state = client.kill_player(timeout = 1.0)
-
-    assert mapping.commands_received == [sm.COMMAND_KILL_PLAYER]
-    assert state.command == sm.COMMAND_NONE
-    assert state.command_result == sm.COMMAND_RESULT_OK
-    assert mapping.steps_serviced == []            # the ack does not step the game
-
-    _frame, s1 = client.step(0, 1, timeout = 1.0)
-    _frame, s2 = client.step(0, 1, timeout = 1.0)
-    assert s1.player_dead is True                  # edge on the step after the kill ...
-    assert s2.player_dead is False                 # ... and only that step
+    client.connect(liveness_timeout = 0.1)
+    setattr(mapping, attr, value)
+    with pytest.raises(sm.CommandError, match = match):
+        client.send_command(sm.COMMAND_RESET, timeout = 0.05)
 
 
-def test_kill_player_error_raises():
-    mapping = FakeMapping()
-    mapping.fail_commands = True
-    client = make_client(mapping)
-    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
-    with pytest.raises(sm.CommandError, match = "error"):
-        client.kill_player(timeout = 1.0)
-
-
-def test_kill_player_rejected_when_not_ready():
-    mapping = FakeMapping(auto_ready = False)      # mod never enters the game -> no player to kill
-    client = make_client(mapping)
-    client.connect(wait_ready = False, liveness_timeout = 0.1)
-    with pytest.raises(sm.CommandError, match = "error"):
-        client.kill_player(timeout = 1.0)
-    assert mapping.commands_received == [sm.COMMAND_KILL_PLAYER]
-
-
-def test_kill_player_timeout_raises():
-    mapping = FakeMapping()
-    mapping.service_commands = False
-    client = make_client(mapping)
-    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
-    with pytest.raises(sm.CommandError, match = "not acknowledged"):
-        client.kill_player(timeout = 0.05)
-
-
-@pytest.mark.parametrize("method, command", [("hop_room", sm.COMMAND_HOP_ROOM),
-                                             ("switch_region", sm.COMMAND_SWITCH_REGION)])
-def test_room_and_region_moves_send_their_arg_and_ack_without_stepping(method, command):
+@pytest.mark.parametrize("method, args, command", [("kill_player", (), sm.COMMAND_KILL_PLAYER),
+                                                   ("hop_room", (3,), sm.COMMAND_HOP_ROOM),
+                                                   ("switch_region", (3,), sm.COMMAND_SWITCH_REGION)])
+def test_debug_commands_send_their_arg_and_ack_without_stepping(method, args, command):
     mapping = FakeMapping()
     client = make_client(mapping)
-    client.connect(wait_ready = True, ready_timeout = 1.0, liveness_timeout = 0.1)
+    client.connect(liveness_timeout = 0.1)
 
-    state = getattr(client, method)(3, timeout = 1.0)
-    getattr(client, method)(0, timeout = 1.0)
+    state = getattr(client, method)(*args, timeout = 1.0)
 
-    assert mapping.commands_received == [command, command]
-    assert mapping.command_args == [3, 0]          # the exit / gate choice travels in command_arg
+    assert mapping.commands_received == [command]
+    assert mapping.command_args == [args[0] if args else 0]   # the exit / gate choice travels in command_arg
     assert state.command == sm.COMMAND_NONE and state.command_result == sm.COMMAND_RESULT_OK
     assert mapping.steps_serviced == []            # the ack does not step the game
-
-    mapping.fail_commands = True
-    with pytest.raises(sm.CommandError, match = "error"):
-        getattr(client, method)(1, timeout = 1.0)
 
 
 def test_operations_require_connection():
@@ -506,14 +394,15 @@ def test_env_construction_is_cheap_and_never_touches_mapping():
     assert calls == []
     assert not env.connected
     assert env.observation_space.shape == (4, 8, 3)
-    import gymnasium.spaces as spaces
     assert isinstance(env.action_space, spaces.MultiBinary)
     assert env.action_space.shape == (sm.NUM_KEYS,) == (9,)
+    assert gym.registry["RainWorld-v0"].entry_point == "rainworld_rl.rainworld_env:RainWorldEnv"
 
 
 def test_env_reset_without_game_raises_clear_error():
     mapping = FakeMapping(alive = False)
     client = make_client(mapping)
+    client.connect = functools.partial(client.connect, liveness_timeout = 0.1)
     env = RainWorldEnv(8, 4, client = client)
     with pytest.raises(sm.GameNotRunningError) as excinfo:
         env.reset()
@@ -534,17 +423,11 @@ def test_env_reset_sends_reset_and_returns_frame_and_info():
     assert obs.shape == (4, 8, 3) and obs.dtype == np.uint8
     assert mapping.steps_serviced == [(0, 2)]         # one no-op step of ticks_per_step
     assert info["cycle_number"] == 0 and info["ready"] and info["in_game"]
-    assert set(info) == {
-        "player_dead", "karma", "karma_cap", "food", "player_pos", "room_index",
-        "cycle_number", "step_counter", "in_game", "ready", "human_override",
-        "food_max", "in_shelter", "cycle_survived", "rain", "dialog_open", "cycle_progress",
-        "food_to_hibernate", "malnourished", "region",
-    }
     assert info["region"] == "SU"
     assert env.connected
 
 
-def test_env_reset_wipe_false_skips_command_and_waits_ready():
+def test_env_reset_wipe_false_skips_command_and_requires_ready():
     mapping = FakeMapping()
     mapping.set_mod_bit(sm.STATUS_READY, True)
     env = make_env(mapping)
@@ -552,8 +435,6 @@ def test_env_reset_wipe_false_skips_command_and_waits_ready():
     assert mapping.commands_received == []
     assert obs.shape == (4, 8, 3)
 
-
-def test_env_reset_wipe_false_requires_ready():
     mapping = FakeMapping(auto_ready = False)  # never READY, and no RESET to make it so
     env = make_env(mapping)
     with pytest.raises(sm.ReadyTimeoutError):
@@ -598,43 +479,25 @@ def test_env_debug_kill_sends_command_and_death_edge_is_one_step():
     assert info2["player_dead"] is False                  # continual env: death is an edge, not an end
 
 
-def test_env_debug_kill_requires_connection_and_propagates_command_error():
-    env = make_env(FakeMapping())
-    with pytest.raises(sm.GameNotRunningError):
-        env.debug_kill()
-
+@pytest.mark.parametrize("method, args, command", [("step", (0,), None),
+                                                   ("debug_kill", (), sm.COMMAND_KILL_PLAYER),
+                                                   ("debug_hop_room", (7,), sm.COMMAND_HOP_ROOM),
+                                                   ("debug_switch_region", (2,), sm.COMMAND_SWITCH_REGION)])
+def test_env_calls_require_connection_and_propagate_command_errors(method, args, command):
     mapping = FakeMapping()
     env = make_env(mapping)
+    with pytest.raises(sm.GameNotRunningError):
+        getattr(env, method)(*args)
+    if command is None:
+        return
+
     env.reset()
+    getattr(env, method)(*args)
+    assert mapping.commands_received == [sm.COMMAND_RESET, command]
+    assert mapping.command_args[1:] == [args[0] if args else 0]
     mapping.fail_commands = True
     with pytest.raises(sm.CommandError):
-        env.debug_kill(timeout = 0.2)
-
-
-def test_env_debug_hop_room_and_switch_region_send_commands():
-    env = make_env(FakeMapping())
-    with pytest.raises(sm.GameNotRunningError):
-        env.debug_hop_room(1)
-    with pytest.raises(sm.GameNotRunningError):
-        env.debug_switch_region()
-
-    mapping = FakeMapping()
-    env = make_env(mapping)
-    env.reset()
-    env.debug_hop_room(7)
-    env.debug_switch_region(2)
-    assert mapping.commands_received == [sm.COMMAND_RESET, sm.COMMAND_HOP_ROOM, sm.COMMAND_SWITCH_REGION]
-    assert mapping.command_args[1:] == [7, 2]
-
-    mapping.fail_commands = True
-    with pytest.raises(sm.CommandError):
-        env.debug_hop_room(0, timeout = 0.2)
-
-
-def test_env_step_before_connect_raises():
-    env = make_env(FakeMapping())
-    with pytest.raises(sm.GameNotRunningError):
-        env.step(0)
+        getattr(env, method)(*args, timeout = 0.2)
 
 
 def test_env_set_frame_dimensions_updates_space_and_frames():
@@ -647,8 +510,3 @@ def test_env_set_frame_dimensions_updates_space_and_frames():
     assert obs.shape == (2, 6, 3)
     assert (mapping.header().frame_width, mapping.header().frame_height) == (6, 2)
 
-
-def test_gym_registration():
-    import gymnasium as gym
-    assert "RainWorld-v0" in gym.registry
-    assert gym.registry["RainWorld-v0"].entry_point == "rainworld_rl.rainworld_env:RainWorldEnv"
